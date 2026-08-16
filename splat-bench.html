@@ -297,6 +297,18 @@
   </section>
 
   <section class="mod">
+    <h2>Preset <em>json</em></h2>
+    <div class="btns">
+      <button id="savePreset">Save JSON</button>
+      <button id="loadPreset">Load JSON</button>
+    </div>
+    <p style="color:var(--ink-dim); margin:8px 0 0">
+      Saves every parameter, envelope, toggle and camera key — everything except the
+      splat itself, which is referenced by name only. Drop a .json on the viewport to load.
+    </p>
+  </section>
+
+  <section class="mod">
     <h2>Viewport</h2>
     <div class="row"><label>Pixel ratio</label><output id="o-dpr">—</output>
       <input type="range" id="p-dpr" min="0.5" max="2" step="0.05" value="1"></div>
@@ -306,6 +318,7 @@
 </aside>
 
 <input type="file" id="file" accept=".ply,.spz,.splat,.ksplat,.sog,.zip,.rad" hidden>
+<input type="file" id="presetFile" accept=".json,application/json" hidden>
 
 <script type="module">
 /* ------------------------------------------------------------------ *
@@ -337,6 +350,7 @@ import { Muxer, ArrayBufferTarget } from "mp4-muxer";
  * state up here.
  * ------------------------------------------------------------------ */
 let mesh = null;
+let assetLabel = null;                // provenance for saved presets
 let playhead = 0;                     // normalised timeline position, 0..1
 let radius = 1;                       // scene bounding-sphere radius
 let dpr = 1;
@@ -921,6 +935,7 @@ async function loadSplat(source, label) {
     const n = splatCount(mesh).toLocaleString();
     $("t-splats").textContent = n;
     $("t-state").textContent = "idle";
+    assetLabel = label;
     setStatus(`${label} — ${n} gaussians.`);
   } catch (err) {
     console.error(err);
@@ -962,6 +977,7 @@ addEventListener("drop", async (e) => {
   e.preventDefault();
   document.body.classList.remove("dragging");
   const f = e.dataTransfer.files?.[0]; if (!f) return;
+  if (/\.json$/i.test(f.name)) { readPreset(f); return; }
   loadSplat({ bytes: new Uint8Array(await f.arrayBuffer()), name: f.name }, f.name);
 });
 
@@ -1148,6 +1164,142 @@ $("render").onclick = async () => {
     pushUniforms();
     resize();
   }
+};
+
+/* ------------------------------------------------------------------ *
+ * Presets — the whole editable state as JSON
+ *
+ * Envelopes alone would not round-trip a scene: a disarmed parameter reads
+ * from P, so restoring curves without the underlying slider values gives you
+ * a file that does not reproduce what you saved. This serialises everything
+ * editable — parameters, envelopes, toggles, camera keys, output settings.
+ *
+ * The splat itself is referenced by name only. Captures are hundreds of MB
+ * and often not redistributable; embedding one would make presets unusable
+ * as the small shareable text files they are meant to be.
+ * ------------------------------------------------------------------ */
+const PRESET_FORMAT = "splat-bench-preset";
+const PRESET_VERSION = 1;
+const TOGGLES = ["revAnim", "revFlip", "camDrive", "useLod"];
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+function serialize() {
+  const vec = (k) => (k ? { pos: k.pos.toArray(), tgt: k.tgt.toArray() } : null);
+  const envs = {};
+  for (const [id, e] of Object.entries(ENV)) {
+    if (!e.keys.length) continue;                 // don't persist empty envelopes
+    envs[id] = {
+      on: !!e.on,
+      smooth: e.smooth !== false,
+      keys: e.keys.map((k) => ({ t: +k.t.toFixed(6), v: +k.v.toFixed(6) })),
+    };
+  }
+  return {
+    format: PRESET_FORMAT,
+    version: PRESET_VERSION,
+    saved: new Date().toISOString(),
+    asset: assetLabel,                            // provenance only, never auto-loaded
+    params: Object.fromEntries(SPEC.map(([id]) => [id, P[id]])),
+    toggles: Object.fromEntries(TOGGLES.map((id) => [id, $(id).checked])),
+    output: { res: $("res").value, fps: $("fps").value },
+    camera: { A: vec(key.A), B: vec(key.B) },
+    envelopes: envs,
+  };
+}
+
+/* Forgiving on the way in: unknown ids are skipped, missing fields keep their
+   current value, and every number is clamped to its control's own range.
+   A preset is a plain text file a user may well have hand-edited. */
+function applyPreset(o) {
+  if (!o || o.format !== PRESET_FORMAT) throw new Error("not a splat-bench preset");
+  if (!Number.isFinite(o.version)) throw new Error("preset has no version");
+  if (o.version > PRESET_VERSION) {
+    throw new Error(`preset version ${o.version} is newer than this build (${PRESET_VERSION})`);
+  }
+
+  for (const [id, digits] of SPEC) {
+    const v = o.params?.[id];
+    if (!Number.isFinite(v)) continue;
+    const el = $("p-" + id);
+    el.value = clamp(v, parseFloat(el.min), parseFloat(el.max));
+    P[id] = parseFloat(el.value);
+    $("o-" + id).textContent = readout(id, digits, P[id]);
+    markDirty(id);
+  }
+  dpr = P.dpr;
+  resize();
+
+  for (const id of TOGGLES) {
+    if (typeof o.toggles?.[id] === "boolean") $(id).checked = o.toggles[id];
+  }
+  if (o.output?.res) $("res").value = o.output.res;
+  if (o.output?.fps) $("fps").value = o.output.fps;
+
+  // envelopes: wipe first, so loading is a replace and never a merge
+  for (const id of ANIM) {
+    const e = envOf(id);
+    e.keys.length = 0;
+    e.on = false;
+    e.smooth = true;
+  }
+  for (const [id, src] of Object.entries(o.envelopes ?? {})) {
+    if (!ANIM.includes(id)) continue;             // silently drop unknown/stale ids
+    const el = $("p-" + id);
+    const lo = parseFloat(el.min), hi = parseFloat(el.max);
+    const e = envOf(id);
+    e.keys = (Array.isArray(src?.keys) ? src.keys : [])
+      .filter((k) => Number.isFinite(k?.t) && Number.isFinite(k?.v))
+      .map((k) => ({ t: clamp(k.t, 0, 1), v: clamp(k.v, lo, hi) }))
+      .sort((a, b) => a.t - b.t);
+    e.smooth = src.smooth !== false;
+    e.on = !!src.on && e.keys.length > 0;         // an empty envelope cannot be armed
+  }
+
+  const vec3 = (a) => new THREE.Vector3().fromArray(a);
+  const restore = (c) =>
+    c && Array.isArray(c.pos) && Array.isArray(c.tgt)
+      ? { pos: vec3(c.pos), tgt: vec3(c.tgt) }
+      : null;
+  key.A = restore(o.camera?.A);
+  key.B = restore(o.camera?.B);
+  $("setA").classList.toggle("on", !!key.A);
+  $("setB").classList.toggle("on", !!key.B);
+
+  pushUniforms();
+  syncSliders();
+  refreshKeyBtns();
+  laneHead();
+  drawLane();
+  updateClock();
+}
+
+$("savePreset").onclick = () => {
+  const blob = new Blob([JSON.stringify(serialize(), null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `splat-bench-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.json`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  const n = Object.values(ENV).filter((e) => e.keys.length).length;
+  setStatus(`Preset saved — ${n} envelope${n === 1 ? "" : "s"}.`);
+};
+
+$("loadPreset").onclick = () => $("presetFile").click();
+
+async function readPreset(file) {
+  try {
+    applyPreset(JSON.parse(await file.text()));
+    const n = Object.values(ENV).filter((e) => e.keys.length).length;
+    setStatus(`Preset loaded — ${n} envelope${n === 1 ? "" : "s"}.`);
+  } catch (err) {
+    setStatus(`Preset load failed: ${err.message}`, true);
+  }
+}
+
+$("presetFile").onchange = (e) => {
+  const f = e.target.files?.[0];
+  if (f) readPreset(f);
+  e.target.value = "";                            // allow reloading the same file
 };
 
 /* ------------------------------------------------------------------ *

@@ -49,6 +49,11 @@ at the playhead and focus it in the curve lane; drag keys in the lane, or drag
 the slider itself to auto-key. Armed sliders become live readouts of their
 curve. Exports honour envelopes.
 
+**Save JSON** writes the whole editable state — parameters, envelopes, toggles,
+camera keys — as a small text file. The splat is referenced by name only, not
+embedded, so load your capture first and then the preset. Drop a `.json` on the
+viewport to load it.
+
 Keep the tab visible while exporting — Chrome throttles background timers to
 ~1s, which slows the render to roughly a frame per second.
 

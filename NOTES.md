@@ -283,11 +283,67 @@ TDZ error and silently kills everything below it. The lane sizes from CSS and
 carries its own resize listener. There is a comment in `resize()` saying so —
 leave it there.
 
-### Next on this
+---
 
-Envelopes are in-memory only. Save/load of the whole parameter + envelope set
-as JSON is the obvious next step and is what makes the feature usable across
-sessions.
+## Presets — save/load as JSON
+
+Envelopes alone do not round-trip a scene. A disarmed parameter reads from `P`,
+so restoring curves without the underlying slider values gives you a file that
+does not reproduce what you saved. The preset is therefore the whole editable
+state: parameters, envelopes, toggles, camera keys, output settings.
+
+The splat is referenced **by name only** (`asset`), never embedded. Captures are
+hundreds of MB and often not redistributable; embedding one would destroy the
+point of a small shareable text file. Loading a preset does not load a capture.
+
+### Shape
+
+```json
+{
+  "format": "splat-bench-preset",
+  "version": 1,
+  "saved": "…", "asset": "butterfly.spz",
+  "params":    { "cullA": 0.3, … },        // all 18, manual values (P, not V)
+  "toggles":   { "revFlip": true, … },
+  "output":    { "res": "1920x1080", "fps": "30" },
+  "camera":    { "A": {"pos":[…],"tgt":[…]}, "B": … },
+  "envelopes": { "revY": { "on": true, "smooth": true,
+                           "keys": [{"t":0,"v":0},{"t":1,"v":1}] } }
+}
+```
+
+`params` stores `P`, the manual values — never `V`. Saving the evaluated values
+would bake whatever the playhead happened to be sitting on into the file.
+Envelopes with no keys are not persisted.
+
+### Loading is deliberately forgiving
+
+A preset is a plain text file someone may well hand-edit, so nothing in it is
+trusted:
+
+- unknown parameter and envelope ids are skipped silently
+- every number is clamped to its own control's `min`/`max`; `t` is clamped 0..1
+- non-finite values are dropped, keys are re-sorted by `t`
+- an envelope with `on: true` but no keys is left disarmed
+- `version` newer than the build is refused with a message rather than
+  half-applied
+- envelopes are **wiped before applying**, so a load is a replace and never a
+  merge with what was already there
+
+Verified against malformed JSON, wrong format, missing version, future version,
+out-of-range params, unknown ids, non-animatable ids and empty key lists. None
+kill the module; each reports through the status line.
+
+Bump `PRESET_VERSION` on any breaking shape change and handle the old shape in
+`applyPreset`, rather than letting the version check reject files it could have
+migrated.
+
+### Round-trip
+
+State → save → wipe → load reproduces the fingerprint byte-exactly (all 18
+readouts, toggles, armed envelope count, camera key flags, output settings).
+Dropping a `.json` on the viewport routes to the preset loader; anything else
+still goes to the splat loader.
 
 ---
 
@@ -389,8 +445,7 @@ without re-testing export.
    now exercised too — see the verified export run below.
 3. ~~**Per-parameter envelopes.**~~ **Done** — see the Envelopes section above.
    Keyframe lists per parameter, a curve lane with draggable keys, auto-key on
-   armed sliders, honoured by the export path. Persistence (save/load as JSON)
-   is the remaining piece.
+   armed sliders, honoured by the export path, and persisted as JSON presets.
 4. **SDF-shaped edits** via Spark's `SplatEdit` / `SplatEditSdf` /
    `SplatEditSdfType` — box and sphere region colorize/clip. This is the
    Irrealix "crop with spherical or box shape" primitive and Spark supports it
