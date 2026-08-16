@@ -117,15 +117,20 @@ a sort/async glitch rather than a missing invalidation.
 every `k`. Expected from the formula, not a bug — but it means the midpoint is a
 bad place to check whether the ease slider works. Probe at 0.25.
 
-**The `settle` wait is still wall-clock and still clamped in a hidden tab.**
-Chrome throttles `setTimeout` to ~1s when the tab is not visible (measured:
-`sleep(2)` → 313ms, `sleep(24)` → 1000ms). Encoder backpressure no longer uses
-a timer, but the settle itself does, so a background export runs at roughly
-1 frame/sec regardless of the slider. The render loop stops entirely when
-hidden — `requestAnimationFrame` does not fire — so the live view freezes too.
-The status line now appends `[tab hidden — throttled]` and a warning fires at
-render start. A real fix means hooking Spark's sort-complete signal instead of
-sleeping, which is the same fix the Export section has wanted all along.
+**A hidden tab still stops the render loop.** `requestAnimationFrame` does not
+fire when the tab is not visible, so the live view freezes and `setTimeout` is
+clamped to ~1s. The export no longer depends on that timer (see Fixed), but a
+background export still crawls because nothing composites. The status line
+appends `[tab hidden — throttled]` and a warning fires at render start.
+
+This also breaks automated pixel probes: readPixels can only ever return the
+last composited buffer. Use `?debug=1` and `window.__bench.settled()`, which
+draws synchronously and awaits the sort without involving rAF.
+
+**Region: `ellipsoid` renders identically to `sphere`.** Correct, not a bug —
+the Size control is a single uniform scalar, and a uniformly-scaled ellipsoid
+*is* a sphere. Ellipsoid only becomes distinct with per-axis size, which the
+current UI cannot express. Add three size sliders if it is ever wanted.
 
 ---
 
@@ -206,6 +211,78 @@ await sleep(2)` cost ~313ms per iteration in a hidden tab instead of 2ms.
 Replaced with `drain()`, which awaits the encoder's `dequeue` event — not
 clamped — raced against a 50ms sleep to cover the case where the queue empties
 between the size check and the listener attaching.
+
+**The `settle` wait is now a deterministic sort signal.** The export loop used
+to render, `sleep(settle)`, render, capture — where 24 ms was an admitted guess.
+It now `await`s `spark.update({ scene, camera })`, which runs generate + sort for
+that exact viewpoint and resolves when both are done. `settle` survives as an
+extra manual wait defaulting to 0.
+
+Note the API shape: **in Spark 2.1.0 the `SparkRenderer` IS the viewpoint.** It
+owns `update()`, `driveSort()` and `sorting` directly — there is no separate
+`SparkViewpoint` instance to reach through, and `spark.viewpoint` is
+`undefined`. `minSortIntervalMs` defaults to 0, so `driveSort()` is not
+deferred behind a timer.
+
+---
+
+## Region — Spark's native SDF edit
+
+Roadmap item 4. This is **not** a dyno effect and does not belong in
+`buildModifier()`: Spark applies `SplatEdit`/`SplatEditSdf` inside its own
+pipeline, with box/sphere/ellipsoid/cylinder/capsule/plane built in.
+
+### Attachment and scoping
+
+A `SplatEdit` whose ancestor chain reaches a `SplatMesh` is scoped to that mesh.
+One with **no** `SplatMesh` ancestor is global and hits every editable mesh in
+the scene. Hence `mesh.add(edit)`, never `scene.add(edit)`. `SplatMesh.editable`
+defaults to true. The `SplatEditSdf` is parented to the edit so its world matrix
+defines the shape.
+
+### The invariant still holds
+
+Every SDF property — type, invert, opacity, colour, soft edge, transform — packs
+into a uniform array and a data texture, so changing any of them is a data
+write with no recompile. Only changing the **number** of edits or SDFs
+reallocates and sets `generatorDirty`. So exactly one edit and one SDF are
+created per mesh and never added or removed; "Off" is a mathematically neutral
+edit (opacity 1, white, multiply), not a detachment.
+
+One consequence: attaching the edit on load does trigger one generator rebuild,
+and for a frame or two during it **the mesh renders as nothing**. A probe taken
+immediately after load reads 0 coverage and looks like total failure. It is
+transient — re-probe once settled. This cost two false diagnoses.
+
+### radius vs scale is per-shape, and getting it wrong fails silently
+
+Measured on the butterfly, crop at size 0.35 (coverage %):
+
+| shape | scale=R radius=R | scale=R radius=0 | correct driver |
+|---|---|---|---|
+| sphere | 3.53 | **0** | `radius` only; scale ignored |
+| box | 3.53 | **4.66** | `scale` = half-extents; radius = corner rounding |
+| ellipsoid | 3.53 | 3.53 | `scale` = per-axis radii |
+| cylinder | 4.47 | **0** | needs both |
+| capsule | 4.60 | **0** | needs both |
+
+Setting `radius = size` for everything is what made box and ellipsoid render as
+spheres — a rounded box whose rounding equals its half-extent *is* a sphere.
+Setting it to 0 for everything collapses cylinder and capsule to nothing. Hence
+`ROUND_BY_RADIUS = {sphere, cylinder, capsule}`. Nothing errors in either case,
+which is exactly why this needed measuring rather than reading.
+
+### Modes
+
+`cut` = opacity 0 inside. `crop` = the same with `edit.invert`, removing the
+outside. `colorize` = multiply blend with the RGB triple. Verified distinct:
+off 9.95, cut 4.39, crop 6.07, colorize shifts R 87.5→111.2 and B 60.6→17.3.
+
+Region parameters go through `SPEC`, so they inherit reset buttons, envelopes
+and preset persistence for free — an animated crop is just an envelope on
+`rgX`/`rgSize`.
+
+---
 
 **Dev-loop gotcha:** `python3 -m http.server` sends only `Last-Modified`, and
 Chrome heuristically caches the page. After the TDZ fix the browser kept running
@@ -446,10 +523,10 @@ without re-testing export.
 3. ~~**Per-parameter envelopes.**~~ **Done** — see the Envelopes section above.
    Keyframe lists per parameter, a curve lane with draggable keys, auto-key on
    armed sliders, honoured by the export path, and persisted as JSON presets.
-4. **SDF-shaped edits** via Spark's `SplatEdit` / `SplatEditSdf` /
-   `SplatEditSdfType` — box and sphere region colorize/clip. This is the
-   Irrealix "crop with spherical or box shape" primitive and Spark supports it
-   natively; no need to hand-roll it in dyno.
+4. ~~**SDF-shaped edits** via Spark's `SplatEdit` / `SplatEditSdf` /
+   `SplatEditSdfType`.~~ **Done** — see the Region section above. Cut, crop and
+   colorize across six shapes, animatable and persisted like any other
+   parameter.
 5. Multiple `SplatMesh` instances in one scene with independent transforms.
 6. Depth pass output for compositing.
 7. Audio-reactive parameter drive (Web Audio FFT → uniforms). This is the reason

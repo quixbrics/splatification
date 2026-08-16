@@ -237,6 +237,47 @@
   </section>
 
   <section class="mod">
+    <h2>Region <em>sdf edit</em></h2>
+    <div class="btns" style="margin-bottom:9px">
+      <select id="rgMode" title="What the region does to the splats inside it">
+        <option value="off" selected>Off</option>
+        <option value="cut">Cut inside</option>
+        <option value="crop">Crop to shape</option>
+        <option value="color">Colorize inside</option>
+      </select>
+      <select id="rgShape" title="Signed-distance shape">
+        <option value="sphere" selected>Sphere</option>
+        <option value="box">Box</option>
+        <option value="ellipsoid">Ellipsoid</option>
+        <option value="cylinder">Cylinder</option>
+        <option value="capsule">Capsule</option>
+        <option value="plane">Plane</option>
+        <option value="all">All</option>
+      </select>
+    </div>
+    <div class="row"><label>Centre X</label><output id="o-rgX">—</output>
+      <input type="range" id="p-rgX" min="-1.5" max="1.5" step="0.005" value="0"></div>
+    <div class="row"><label>Centre Y</label><output id="o-rgY">—</output>
+      <input type="range" id="p-rgY" min="-1.5" max="1.5" step="0.005" value="0"></div>
+    <div class="row"><label>Centre Z</label><output id="o-rgZ">—</output>
+      <input type="range" id="p-rgZ" min="-1.5" max="1.5" step="0.005" value="0"></div>
+    <div class="row"><label>Size</label><output id="o-rgSize">—</output>
+      <input type="range" id="p-rgSize" min="0.01" max="2" step="0.005" value="0.5"></div>
+    <div class="row"><label>Soft edge</label><output id="o-rgSoft">—</output>
+      <input type="range" id="p-rgSoft" min="0" max="0.5" step="0.002" value="0"></div>
+    <div class="row"><label>Colorize R</label><output id="o-rgR">—</output>
+      <input type="range" id="p-rgR" min="0" max="2" step="0.01" value="1"></div>
+    <div class="row"><label>Colorize G</label><output id="o-rgG">—</output>
+      <input type="range" id="p-rgG" min="0" max="2" step="0.01" value="1"></div>
+    <div class="row"><label>Colorize B</label><output id="o-rgB">—</output>
+      <input type="range" id="p-rgB" min="0" max="2" step="0.01" value="1"></div>
+    <p style="color:var(--ink-dim); margin:8px 0 0">
+      Spark's native SDF edit, not a dyno effect. Centre and size are in units of scene
+      radius. Colorize only applies in Colorize mode.
+    </p>
+  </section>
+
+  <section class="mod">
     <h2>Reveal <em>sweep plane</em></h2>
     <div class="row"><label>Plane height</label><output id="o-revY">—</output>
       <input type="range" id="p-revY" min="0" max="1" step="0.002" value="1"></div>
@@ -289,10 +330,11 @@
     <div class="row"><label>Bitrate (Mbps)</label><output id="o-br">—</output>
       <input type="range" id="p-br" min="2" max="80" step="1" value="20"></div>
     <div class="row"><label>Sort settle (ms)</label><output id="o-settle">—</output>
-      <input type="range" id="p-settle" min="0" max="200" step="4" value="24"></div>
+      <input type="range" id="p-settle" min="0" max="200" step="4" value="0"></div>
     <p style="color:var(--ink-dim); margin:8px 0 0">
-      Settle waits for Spark's async depth sort before each captured frame. Raise it if
-      exported frames show wrong-order blending that the live view doesn't.
+      Each frame now awaits Spark's own generate+sort completion, so this should stay
+      at 0. It is an extra manual wait kept only as an escape hatch if a capture ever
+      still shows wrong-order blending that the live view doesn't.
     </p>
   </section>
 
@@ -337,7 +379,7 @@ addEventListener("unhandledrejection", (e) =>
 
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { SparkRenderer, SplatMesh, dyno } from "@sparkjsdev/spark";
+import { SparkRenderer, SplatMesh, SplatEdit, SplatEditSdf, dyno } from "@sparkjsdev/spark";
 import { Muxer, ArrayBufferTarget } from "mp4-muxer";
 
 /* ------------------------------------------------------------------ *
@@ -485,6 +527,8 @@ function buildModifier() {
 const SPEC = [
   ["ease", 2], ["dur", 1],
   ["cullA", 2], ["cullS", 4], ["scale", 2],
+  ["rgX", 2], ["rgY", 2], ["rgZ", 2], ["rgSize", 2], ["rgSoft", 3],
+  ["rgR", 2], ["rgG", 2], ["rgB", 2],
   ["revY", 3], ["revS", 3], ["revK", 2],
   ["dAmt", 3], ["dFrq", 2], ["dSpd", 2], ["dRnd", 2],
   ["tR", 2], ["tG", 2], ["tB", 2],
@@ -627,6 +671,9 @@ for (const [id, digits] of SPEC) {
   markDirty(id);
 }
 for (const id of ["revAnim", "revFlip", "camDrive"]) {
+  $(id).addEventListener("change", pushUniforms);
+}
+for (const id of ["rgMode", "rgShape"]) {
   $(id).addEventListener("change", pushUniforms);
 }
 
@@ -862,10 +909,88 @@ laneHead();
 addEventListener("resize", laneFit);
 laneFit();
 
+/* ------------------------------------------------------------------ *
+ * Region — Spark's native SDF edit
+ *
+ * This is NOT a dyno effect. Spark applies SplatEdit/SplatEditSdf inside its
+ * own pipeline, so it does not belong in buildModifier() and does not need
+ * hand-rolling: box/sphere/ellipsoid/cylinder/capsule/plane are built in.
+ *
+ * The invariant still holds. Every SDF property — shape type, invert,
+ * opacity, colour, soft edge, transform — is packed into a uniform array and
+ * a data texture, so changing any of them is a data write. Only changing the
+ * NUMBER of edits or SDFs reallocates and sets `generatorDirty`. So exactly
+ * one edit and one SDF are created per mesh and never added or removed;
+ * "Off" is expressed as a mathematically neutral edit (opacity 1, white
+ * multiply), not by detaching anything.
+ *
+ * A SplatEdit whose ancestor chain reaches a SplatMesh is scoped to that
+ * mesh; one with no SplatMesh ancestor is global and hits every editable
+ * mesh in the scene. Hence mesh.add(edit), not scene.add(edit).
+ * ------------------------------------------------------------------ */
+let edit = null, sdf = null;
+
+function attachRegion(m) {
+  sdf = new SplatEditSdf({ type: "sphere", radius: 1 });
+  edit = new SplatEdit({ rgbaBlendMode: "multiply", softEdge: 0 });
+  edit.add(sdf);                    // parent it: the SDF's world matrix is the shape
+  m.add(edit);                      // scope the edit to this mesh
+}
+
+const WHITE = new THREE.Color(1, 1, 1);
+
+/* Shapes whose primary extent comes from `radius`. For everything else
+   radius is a rounding term and must stay 0, or the shape degrades. */
+const ROUND_BY_RADIUS = new Set(["sphere", "cylinder", "capsule"]);
+
+function pushRegion() {
+  if (!edit || !sdf) return;
+  const mode = $("rgMode").value;
+
+  /* `radius` and `scale` mean different things per shape, and getting this
+     wrong is silent — it degrades a shape into a different one rather than
+     erroring. Measured on the butterfly at crop size 0.35:
+
+       sphere     driven by radius alone; scale ignored entirely
+       box        scale = half-extents, radius = CORNER ROUNDING
+       ellipsoid  scale = per-axis radii, radius = rounding
+       cylinder   needs both: radius = cross-section, scale = extent
+       capsule    needs both: radius = cap radius, scale = length
+
+     Setting radius = size for every shape is what made box and ellipsoid
+     render as spheres: a rounded box whose rounding equals its half-extent
+     IS a sphere. Leaving radius at 0 for cylinder/capsule collapses them to
+     nothing. Hence the split below. */
+  const shape = $("rgShape").value;
+  sdf.type = shape;
+  sdf.position.set(V.rgX * radius, V.rgY * radius, V.rgZ * radius);
+  const size = Math.max(V.rgSize * radius, 1e-4);
+  sdf.scale.setScalar(size);
+  sdf.radius = ROUND_BY_RADIUS.has(shape) ? size : 0;
+  edit.softEdge = V.rgSoft * radius;
+
+  // Off must be a no-op regardless of where the shape sits, so that leaving
+  // the module alone can never alter the render.
+  edit.invert = mode === "crop";    // crop removes the OUTSIDE
+  edit.rgbaBlendMode = "multiply";
+  if (mode === "cut" || mode === "crop") {
+    sdf.opacity = 0;
+    sdf.color.copy(WHITE);
+  } else if (mode === "color") {
+    sdf.opacity = 1;
+    sdf.color.setRGB(V.rgR, V.rgG, V.rgB);
+  } else {
+    sdf.opacity = 1;
+    sdf.color.copy(WHITE);
+  }
+  edit.updateMatrixWorld(true);
+}
+
 /* Sliders are normalised against scene extent so they behave the same on
    any capture. Never feed a raw slider value into a world-space uniform. */
 function pushUniforms() {
   evalParams();
+  pushRegion();
   const span = (bounds.max - bounds.min) || 1;
   const sweep = $("revAnim").checked ? playhead : V.revY;
 
@@ -904,7 +1029,7 @@ const splatCount = (m) => m?.numSplats ?? m?.packedSplats?.numSplats ?? 0;
 
 async function loadSplat(source, label) {
   if (rendering) { setStatus("Busy rendering — wait for the export to finish.", true); return; }
-  if (mesh) { scene.remove(mesh); mesh.dispose?.(); mesh = null; }
+  if (mesh) { scene.remove(mesh); mesh.dispose?.(); mesh = null; edit = null; sdf = null; }
 
   setStatus(`Loading ${label}…`);
   $("drop").classList.add("hide");
@@ -926,6 +1051,8 @@ async function loadSplat(source, label) {
     mesh = new SplatMesh(opts);
     scene.add(mesh);
     await mesh.initialized;
+
+    attachRegion(mesh);
 
     // splat captures are usually Y-down relative to three.js
     mesh.quaternion.set(1, 0, 0, 0);
@@ -1122,10 +1249,16 @@ $("render").onclick = async () => {
       driveCamera();
       controls.update();
 
-      /* Spark sorts splats asynchronously off a GPU readback, so the first
-         render after a camera move can blend in stale order. Render, wait,
-         render again, then capture. The wait is a guess — see NOTES.md. */
+      /* Spark sorts splats asynchronously off a GPU readback, so a frame
+         rendered straight after a camera move can blend in stale order.
+         SparkRenderer.update() runs generate + sort for this exact viewpoint
+         and resolves when they are done, which is the deterministic signal
+         this loop used to approximate by sleeping. (In 2.1.0 the renderer IS
+         the viewpoint — it owns driveSort/sorting directly; there is no
+         separate SparkViewpoint instance to reach through.) `settle` remains
+         as an extra manual wait, now defaulting to 0. */
       renderer.render(scene, camera);
+      await spark.update({ scene, camera });
       if (P.settle > 0) await sleep(P.settle);
       renderer.render(scene, camera);
 
@@ -1179,8 +1312,9 @@ $("render").onclick = async () => {
  * as the small shareable text files they are meant to be.
  * ------------------------------------------------------------------ */
 const PRESET_FORMAT = "splat-bench-preset";
-const PRESET_VERSION = 1;
+const PRESET_VERSION = 2;   // v2 added `selects` (region mode/shape)
 const TOGGLES = ["revAnim", "revFlip", "camDrive", "useLod"];
+const SELECTS = ["rgMode", "rgShape", "res", "fps"];
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 function serialize() {
@@ -1201,7 +1335,8 @@ function serialize() {
     asset: assetLabel,                            // provenance only, never auto-loaded
     params: Object.fromEntries(SPEC.map(([id]) => [id, P[id]])),
     toggles: Object.fromEntries(TOGGLES.map((id) => [id, $(id).checked])),
-    output: { res: $("res").value, fps: $("fps").value },
+    selects: Object.fromEntries(SELECTS.map((id) => [id, $(id).value])),
+    output: { res: $("res").value, fps: $("fps").value },   // kept for v1 readers
     camera: { A: vec(key.A), B: vec(key.B) },
     envelopes: envs,
   };
@@ -1232,8 +1367,16 @@ function applyPreset(o) {
   for (const id of TOGGLES) {
     if (typeof o.toggles?.[id] === "boolean") $(id).checked = o.toggles[id];
   }
+  /* v1 files carry only `output`; v2 adds `selects`. Apply the old shape
+     first so a v2 file's `selects` wins where both are present. */
   if (o.output?.res) $("res").value = o.output.res;
   if (o.output?.fps) $("fps").value = o.output.fps;
+  for (const id of SELECTS) {
+    const v = o.selects?.[id];
+    if (typeof v !== "string") continue;
+    // only accept values the control actually offers
+    if ([...$(id).options].some((opt) => opt.value === v)) $(id).value = v;
+  }
 
   // envelopes: wipe first, so loading is a replace and never a merge
   for (const id of ANIM) {
@@ -1301,6 +1444,38 @@ $("presetFile").onchange = (e) => {
   if (f) readPreset(f);
   e.target.value = "";                            // allow reloading the same file
 };
+
+/* ------------------------------------------------------------------ *
+ * Measurement hook — opt-in via ?debug=1
+ *
+ * Rendering is rAF-driven and Chrome stops rAF entirely in a hidden tab, so
+ * an automated pixel probe can never obtain a fresh frame: readPixels just
+ * returns the last composited buffer. This exposes a synchronous draw plus
+ * the awaitable sort, so verifying a change by measurement does not depend
+ * on the tab being visible. Costs nothing when the flag is absent.
+ * ------------------------------------------------------------------ */
+if (new URLSearchParams(location.search).has("debug")) {
+  window.__bench = {
+    renderer, scene, camera, controls, spark,
+    get mesh() { return mesh; },
+    get edit() { return edit; },
+    get sdf()  { return sdf; },
+    get V()    { return V; },
+    get P()    { return P; },
+    get ENV()  { return ENV; },
+    draw() {
+      pushUniforms();
+      driveCamera();
+      controls.update();
+      renderer.render(scene, camera);
+    },
+    async settled() {
+      this.draw();
+      await spark.update({ scene, camera });
+      renderer.render(scene, camera);
+    },
+  };
+}
 
 /* ------------------------------------------------------------------ *
  * Boot

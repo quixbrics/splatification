@@ -37,6 +37,8 @@ All effects are a single `dyno.dynoBlock` running in one GPU pass as an
 - **Reveal** — soft `smoothstep` sweep plane, shrinking splat scales into the edge
 - **Trim** — per-splat cull by minimum opacity and maximum scale
 - **Tint** — RGB multiply
+- **Region** — Spark's native SDF edit: cut, crop or colorize inside a
+  sphere / box / ellipsoid / cylinder / capsule / plane
 
 Every parameter has a `↺` reset button, which brightens when the value differs
 from its default, and a `◆` keyframe button.
@@ -66,3 +68,10 @@ write that does not bump the version is silently invisible.
 
 Splat captures are gitignored; the app loads a remote test asset so the repo is
 runnable as cloned.
+
+## Debugging
+
+Load with `?debug=1` to expose `window.__bench` — a synchronous `draw()`, an
+awaitable `settled()`, and live access to the mesh, edit and evaluated
+parameters. Rendering is rAF-driven and Chrome stops rAF in a hidden tab, so
+this is the only reliable way to measure pixels from an automated harness.
