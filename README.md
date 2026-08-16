@@ -40,6 +40,11 @@ All effects are a single `dyno.dynoBlock` running in one GPU pass as an
 - **Region** — Spark's native SDF edit: cut, crop or colorize inside a
   sphere / box / ellipsoid / cylinder / capsule / plane
 
+**Audio** drives any parameter from a track's low / mid / high content. The file is
+analysed offline into per-band envelopes rather than sampled live, so scrubbing,
+playback and export all agree. Click a parameter's name to focus it, then pick a band
+in the lane. Audio layers on top of envelopes rather than replacing them.
+
 Every parameter has a `↺` reset button, which brightens when the value differs
 from its default, and a `◆` keyframe button.
 

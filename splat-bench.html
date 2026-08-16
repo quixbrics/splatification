@@ -54,6 +54,20 @@
   #laneRange{color:var(--rule); font-variant-numeric:tabular-nums; font-size:10px}
   #laneHead .sp{flex:1}
   #laneHead button{padding:1px 7px; font-size:10px}
+  #laneHead .lsep{width:1px; height:12px; background:var(--rule)}
+  #laneHead .audlbl{color:var(--ink-dim); letter-spacing:.06em; font-size:10px}
+  #laneHead select{padding:1px 4px; font-size:10px}
+  #audDepth{width:88px}
+  #laneHead output{color:var(--signal); font-variant-numeric:tabular-nums;
+                   font-size:10px; min-width:30px; text-align:right}
+  .meter{display:grid; grid-template-columns:34px 1fr 34px; gap:7px;
+         align-items:center; margin-bottom:5px}
+  .meter label{color:var(--ink-dim)}
+  .meter .bar{height:5px; background:var(--chassis-hi); border:1px solid var(--rule);
+              overflow:hidden}
+  .meter .bar i{display:block; height:100%; width:0%; background:var(--signal);
+                transition:width .05s linear}
+  .meter output{color:var(--signal); font-variant-numeric:tabular-nums; text-align:right}
   #laneWrap{position:relative; flex:1; min-height:0}
   #laneCanvas{width:100%; height:100%; cursor:crosshair; touch-action:none}
   #laneHint{
@@ -73,6 +87,8 @@
   .key:hover{color:var(--signal)}
   .key.armed{color:var(--ink-dim)}
   .key.onkey{color:var(--live)}
+  .key.aud{color:var(--signal)}
+  .key.aud.onkey{color:var(--live)}
   .key.focused{text-shadow:0 0 6px currentColor}
   .key:focus-visible{outline:1px solid var(--signal); outline-offset:1px}
   .key.ghost{visibility:hidden; cursor:default}
@@ -106,6 +122,8 @@
   .mod > h2 em{font-style:normal; color:var(--rule)}
 
   .row{display:grid; grid-template-columns:1fr auto auto 54px; gap:8px; align-items:center; margin-bottom:7px}
+  .row label.focusable{cursor:pointer}
+  .row label.focusable:hover{color:var(--ink)}
   .row label{color:var(--ink-dim); letter-spacing:.05em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
   .row output{color:var(--signal); text-align:right; font-variant-numeric:tabular-nums; letter-spacing:.02em}
   .row input[type=range]{grid-column:1 / -1; width:100%}
@@ -192,10 +210,21 @@
     <button id="envOn" title="Arm or disarm this envelope">Off</button>
     <button id="envMode" title="Interpolation between keys">Smooth</button>
     <button id="envClear" title="Delete every key on this parameter">Clear</button>
+    <span class="lsep"></span>
+    <label class="audlbl">Audio</label>
+    <select id="audBand" title="Frequency band driving the focused parameter">
+      <option value="">off</option>
+      <option value="low">low</option>
+      <option value="mid">mid</option>
+      <option value="high">high</option>
+    </select>
+    <input type="range" id="audDepth" min="-1" max="1" step="0.01" value="0"
+           title="Modulation depth, as a fraction of the parameter's full range">
+    <output id="o-audDepth">0.00</output>
   </div>
   <div id="laneWrap">
     <canvas id="laneCanvas"></canvas>
-    <div id="laneHint">click a &#9670; to focus a parameter</div>
+    <div id="laneHint">click a parameter name to focus it</div>
   </div>
 </div>
 
@@ -339,6 +368,24 @@
   </section>
 
   <section class="mod">
+    <h2>Audio <em>fft drive</em></h2>
+    <div class="btns" style="margin-bottom:9px">
+      <button id="audLoad">Load audio</button>
+      <button id="audPlay" disabled>Preview</button>
+      <button id="audClear" disabled>Clear</button>
+    </div>
+    <div id="audName" style="color:var(--ink-dim); margin-bottom:8px">no audio loaded</div>
+    <div class="meter"><label>Low</label><div class="bar"><i id="m-low"></i></div><output id="o-mlow">0.00</output></div>
+    <div class="meter"><label>Mid</label><div class="bar"><i id="m-mid"></i></div><output id="o-mmid">0.00</output></div>
+    <div class="meter"><label>High</label><div class="bar"><i id="m-high"></i></div><output id="o-mhigh">0.00</output></div>
+    <p style="color:var(--ink-dim); margin:8px 0 0">
+      Analysed offline into per-band envelopes, not sampled live — so scrubbing, playback
+      and export all read the same values. Click a parameter's <em>name</em> to focus it,
+      then pick a band in the lane below. Audio adds on top of any envelope.
+    </p>
+  </section>
+
+  <section class="mod">
     <h2>Preset <em>json</em></h2>
     <div class="btns">
       <button id="savePreset">Save JSON</button>
@@ -361,6 +408,7 @@
 
 <input type="file" id="file" accept=".ply,.spz,.splat,.ksplat,.sog,.zip,.rad" hidden>
 <input type="file" id="presetFile" accept=".json,application/json" hidden>
+<input type="file" id="audioFile" accept="audio/*" hidden>
 
 <script type="module">
 /* ------------------------------------------------------------------ *
@@ -586,6 +634,7 @@ const hasEnv = (id) => { const e = ENV[id]; return !!(e && e.on && e.keys.length
 const KEY_EPS = 1e-3;               // playhead tolerance for "a key is here"
 
 const smooth01 = (x) => x * x * (3 - 2 * x);
+const clampNum = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 function envValue(id, t) {
   const k = ENV[id].keys;
@@ -600,9 +649,110 @@ function envValue(id, t) {
   return a.v + (b.v - a.v) * u;
 }
 
+/* ------------------------------------------------------------------ *
+ * Audio-reactive drive
+ *
+ * The audio is analysed ONCE, offline, into a per-band amplitude envelope.
+ * It is deliberately not sampled live from an AnalyserNode: the offline
+ * export loop does not run at wall-clock speed, so a realtime tap would
+ * drift out of sync the moment you rendered, and the same project would
+ * produce a different result every run. A precomputed envelope indexed by
+ * timeline position makes scrubbing, playback and export read identical
+ * values, which is the only version of this feature worth having.
+ *
+ * Band separation uses OfflineAudioContext + biquad filters rather than a
+ * hand-rolled FFT — same result, built-in DSP, no numerical code to own.
+ * ------------------------------------------------------------------ */
+const BANDS = { low: [20, 200], mid: [200, 2000], high: [2000, 16000] };
+const ENV_RATE = 200;                 // envelope samples per second
+
+const AUD = {};                       // id -> { band, depth }
+const audOf = (id) => (AUD[id] ??= { band: "", depth: 0 });
+
+let audioName = null;
+let audioDur = 0;
+let audioEnv = null;                  // { low: Float32Array, mid, high }
+let audioEl = null;                   // <audio> for optional preview
+const audioLevel = { low: 0, mid: 0, high: 0 };
+
+/* Downsample a rendered band to an RMS envelope at ENV_RATE. */
+function rmsEnvelope(samples, sampleRate) {
+  const step = Math.max(1, Math.round(sampleRate / ENV_RATE));
+  const out = new Float32Array(Math.ceil(samples.length / step));
+  for (let i = 0, o = 0; i < samples.length; i += step, o++) {
+    let sum = 0;
+    const end = Math.min(i + step, samples.length);
+    for (let j = i; j < end; j++) sum += samples[j] * samples[j];
+    out[o] = Math.sqrt(sum / Math.max(end - i, 1));
+  }
+  // normalise per band so `depth` means the same thing on any material
+  let peak = 0;
+  for (const v of out) if (v > peak) peak = v;
+  if (peak > 0) for (let i = 0; i < out.length; i++) out[i] /= peak;
+  return out;
+}
+
+async function analyseAudio(arrayBuffer, name) {
+  const probe = new AudioContext();
+  let buf;
+  try {
+    buf = await probe.decodeAudioData(arrayBuffer);
+  } finally {
+    probe.close();
+  }
+  const env = {};
+  for (const [band, [lo, hi]] of Object.entries(BANDS)) {
+    const off = new OfflineAudioContext(1, buf.length, buf.sampleRate);
+    const src = off.createBufferSource();
+    src.buffer = buf;
+    const hp = off.createBiquadFilter();
+    hp.type = "highpass"; hp.frequency.value = lo; hp.Q.value = 0.7;
+    const lp = off.createBiquadFilter();
+    lp.type = "lowpass";  lp.frequency.value = hi; lp.Q.value = 0.7;
+    src.connect(hp); hp.connect(lp); lp.connect(off.destination);
+    src.start();
+    const rendered = await off.startRendering();
+    env[band] = rmsEnvelope(rendered.getChannelData(0), buf.sampleRate);
+  }
+  audioEnv = env;
+  audioDur = buf.duration;
+  audioName = name;
+  return buf;
+}
+
+/* Timeline seconds -> band amplitude. 1:1 with the clock rather than
+   stretched to fit, so changing Duration changes how much of the track is
+   used, which is what you want when cutting to a specific passage. */
+function audioAt(band, seconds) {
+  if (!audioEnv || !audioEnv[band]) return 0;
+  const arr = audioEnv[band];
+  const x = Math.min(Math.max(seconds, 0), audioDur) * ENV_RATE;
+  const i = Math.floor(x);
+  if (i >= arr.length - 1) return arr[arr.length - 1] ?? 0;
+  return arr[i] + (arr[i + 1] - arr[i]) * (x - i);   // linear, no stepping
+}
+
 const V = {};
 function evalParams() {
-  for (const [id] of SPEC) V[id] = hasEnv(id) ? envValue(id, playhead) : P[id];
+  const seconds = playhead * P.dur;
+  for (const band of Object.keys(BANDS)) audioLevel[band] = audioAt(band, seconds);
+
+  for (const [id] of SPEC) {
+    let v = hasEnv(id) ? envValue(id, playhead) : P[id];
+
+    /* Audio is a modulation ON TOP of the base value, not a replacement, so
+       it layers with envelopes instead of fighting them: an envelope sets
+       the move, audio adds the detail. Depth is a fraction of the
+       parameter's own full range, so one depth means the same amount of
+       visible effect on any parameter. */
+    const a = AUD[id];
+    if (a && a.band && a.depth && !NO_ANIM.has(id)) {
+      const el = $("p-" + id);
+      const lo = parseFloat(el.min), hi = parseFloat(el.max);
+      v = clampNum(v + a.depth * (hi - lo) * audioLevel[a.band], lo, hi);
+    }
+    V[id] = v;
+  }
 }
 
 for (const [id, digits] of SPEC) {          // pass 1: values only
@@ -668,6 +818,16 @@ for (const [id, digits] of SPEC) {
     el.dispatchEvent(new Event("input", { bubbles: true }));
   });
   el.parentElement.insertBefore(btn, $("o-" + id));
+
+  /* Focusing must not mutate. The key glyph both keys AND focuses, which
+     means routing audio onto a parameter via the glyph would silently start
+     an envelope on it. The label is the non-destructive way in. */
+  const lbl = el.parentElement.querySelector("label");
+  if (lbl && !NO_ANIM.has(id)) {
+    lbl.classList.add("focusable");
+    lbl.title = `Focus ${id} in the lane`;
+    lbl.addEventListener("click", () => focusParam(id));
+  }
   markDirty(id);
 }
 for (const id of ["revAnim", "revFlip", "camDrive"]) {
@@ -706,11 +866,17 @@ function refreshKeyBtn(id) {
   const btn = $("p-" + id).parentElement.querySelector(".key");
   if (!btn || btn.classList.contains("ghost")) return;
   const e = ENV[id], n = e?.keys.length ?? 0;
-  btn.classList.toggle("armed", hasEnv(id));
+  const a = AUD[id];
+  const audible = !!(a && a.band && a.depth);
+  btn.classList.toggle("armed", hasEnv(id) || audible);
+  btn.classList.toggle("aud", audible);
   btn.classList.toggle("onkey", !!e?.keys.some((k) => Math.abs(k.t - playhead) < KEY_EPS));
-  btn.title = n
-    ? `${id}: ${n} key${n === 1 ? "" : "s"} — click keys at playhead, alt-click removes`
-    : `${id}: no envelope — click to key at playhead`;
+  const bits = [];
+  if (n) bits.push(`${n} key${n === 1 ? "" : "s"}`);
+  if (audible) bits.push(`audio ${a.band} ${a.depth > 0 ? "+" : ""}${a.depth.toFixed(2)}`);
+  btn.title = bits.length
+    ? `${id}: ${bits.join(", ")} — click keys at playhead, alt-click removes`
+    : `${id}: no automation — click to key at playhead`;
 }
 const refreshKeyBtns = () => { for (const id of ANIM) refreshKeyBtn(id); };
 
@@ -733,9 +899,17 @@ function focusParam(id) {
 
 /* An enveloped slider is a readout, not an input — push the curve's value
    into it so the panel reflects what is actually driving the shader. */
+/* Any parameter whose effective value differs from its manual one is being
+   driven by something — an envelope, audio, or both — so the control must
+   show the driven value. Keying this off `hasEnv` alone left audio-modulated
+   sliders sitting at their manual position while the shader used something
+   else entirely, which is precisely the "panel lies about the state" failure
+   this file has been bitten by before. */
+const isDriven = (id) => hasEnv(id) || !!(AUD[id]?.band && AUD[id]?.depth);
+
 function syncSliders() {
   for (const [id, digits] of SPEC) {
-    if (!hasEnv(id)) continue;
+    if (!isDriven(id)) continue;
     const el = $("p-" + id);
     if (Math.abs(parseFloat(el.value) - V[id]) < 1e-9) continue;
     el.value = V[id];
@@ -752,6 +926,7 @@ function setPlayhead(t) {
   updateClock();
   syncSliders();
   refreshKeyBtns();
+  audMeters();
   drawLane();
 }
 
@@ -764,6 +939,22 @@ function laneHead() {
   $("envOn").textContent = e.on ? "On" : "Off";
   $("envOn").classList.toggle("on", e.on);
   $("envMode").textContent = e.smooth ? "Smooth" : "Linear";
+
+  const a = audOf(focused);
+  const off = NO_ANIM.has(focused);
+  $("audBand").value = off ? "" : a.band;
+  $("audBand").disabled = off;
+  $("audDepth").value = off ? 0 : a.depth;
+  $("audDepth").disabled = off || !a.band;
+  $("o-audDepth").textContent = (off ? 0 : a.depth).toFixed(2);
+}
+
+function audMeters() {
+  for (const band of Object.keys(BANDS)) {
+    const v = audioLevel[band];
+    $("m-" + band).style.width = (v * 100).toFixed(1) + "%";
+    $("o-m" + band).textContent = v.toFixed(2);
+  }
 }
 
 const laneCv = $("laneCanvas");
@@ -1105,6 +1296,9 @@ addEventListener("drop", async (e) => {
   document.body.classList.remove("dragging");
   const f = e.dataTransfer.files?.[0]; if (!f) return;
   if (/\.json$/i.test(f.name)) { readPreset(f); return; }
+  if (/^audio\//i.test(f.type) || /\.(mp3|wav|ogg|m4a|aac|flac)$/i.test(f.name)) {
+    loadAudio(f); return;
+  }
   loadSplat({ bytes: new Uint8Array(await f.arrayBuffer()), name: f.name }, f.name);
 });
 
@@ -1168,6 +1362,7 @@ function frame(now) {
     pushUniforms();
     updateClock();
     syncSliders();
+    audMeters();
     drawLane();
   }
   fpsAvg = fpsAvg * 0.9 + (1 / Math.max(dt, 1e-4)) * 0.1;
@@ -1312,7 +1507,7 @@ $("render").onclick = async () => {
  * as the small shareable text files they are meant to be.
  * ------------------------------------------------------------------ */
 const PRESET_FORMAT = "splat-bench-preset";
-const PRESET_VERSION = 2;   // v2 added `selects` (region mode/shape)
+const PRESET_VERSION = 3;   // v2 added `selects`; v3 added `audio` routing
 const TOGGLES = ["revAnim", "revFlip", "camDrive", "useLod"];
 const SELECTS = ["rgMode", "rgShape", "res", "fps"];
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -1339,6 +1534,16 @@ function serialize() {
     output: { res: $("res").value, fps: $("fps").value },   // kept for v1 readers
     camera: { A: vec(key.A), B: vec(key.B) },
     envelopes: envs,
+    /* Routing only. The audio file itself is referenced by name and never
+       embedded, exactly as the splat is — reload the track, keep the routing. */
+    audio: {
+      name: audioName,
+      routes: Object.fromEntries(
+        Object.entries(AUD)
+          .filter(([, a]) => a.band && a.depth)
+          .map(([id, a]) => [id, { band: a.band, depth: +a.depth.toFixed(4) }]),
+      ),
+    },
   };
 }
 
@@ -1398,6 +1603,14 @@ function applyPreset(o) {
     e.on = !!src.on && e.keys.length > 0;         // an empty envelope cannot be armed
   }
 
+  for (const id of ANIM) { const a = audOf(id); a.band = ""; a.depth = 0; }
+  for (const [id, src] of Object.entries(o.audio?.routes ?? {})) {
+    if (!ANIM.includes(id)) continue;
+    if (!Object.hasOwn(BANDS, src?.band)) continue;
+    audOf(id).band = src.band;
+    audOf(id).depth = clamp(Number(src.depth) || 0, -1, 1);
+  }
+
   const vec3 = (a) => new THREE.Vector3().fromArray(a);
   const restore = (c) =>
     c && Array.isArray(c.pos) && Array.isArray(c.tgt)
@@ -1415,6 +1628,86 @@ function applyPreset(o) {
   drawLane();
   updateClock();
 }
+
+/* ------------------------------------------------------------------ *
+ * Audio controls
+ * ------------------------------------------------------------------ */
+$("audBand").onchange = () => {
+  if (!focused) return;
+  const a = audOf(focused);
+  a.band = $("audBand").value;
+  if (a.band && a.depth === 0) a.depth = 0.3;   // a sensible audible default
+  laneHead();
+  refreshKeyBtn(focused);
+  pushUniforms();
+};
+$("audDepth").oninput = () => {
+  if (!focused) return;
+  audOf(focused).depth = parseFloat($("audDepth").value);
+  $("o-audDepth").textContent = audOf(focused).depth.toFixed(2);
+  pushUniforms();
+};
+
+$("audLoad").onclick = () => $("audioFile").click();
+
+async function loadAudio(file) {
+  setStatus(`Analysing ${file.name}…`);
+  try {
+    const bytes = await file.arrayBuffer();
+    // decodeAudioData detaches the buffer, so keep a copy for the preview element
+    const forPreview = bytes.slice(0);
+    await analyseAudio(bytes, file.name);
+
+    if (audioEl) { audioEl.pause(); URL.revokeObjectURL(audioEl.src); }
+    audioEl = new Audio();
+    audioEl.src = URL.createObjectURL(new Blob([forPreview], { type: file.type || "audio/*" }));
+    audioEl.preload = "auto";
+
+    $("audName").textContent = `${audioName} — ${audioDur.toFixed(1)}s`;
+    $("audPlay").disabled = false;
+    $("audClear").disabled = false;
+    setStatus(`${audioName} analysed — ${audioDur.toFixed(1)}s, 3 bands.`);
+    pushUniforms();
+    audMeters();
+  } catch (err) {
+    setStatus(`Audio analysis failed: ${err.message}`, true);
+  }
+}
+
+$("audioFile").onchange = (e) => {
+  const f = e.target.files?.[0];
+  if (f) loadAudio(f);
+  e.target.value = "";
+};
+
+/* Preview is a convenience for hearing the track against the animation. It
+   is NOT what drives the parameters — that is always the offline envelope,
+   so an export matches what you heard even though nothing is playing. */
+$("audPlay").onclick = () => {
+  if (!audioEl) return;
+  if (audioEl.paused) {
+    audioEl.currentTime = Math.min(playhead * P.dur, Math.max(audioDur - 0.01, 0));
+    audioEl.play().catch((err) => setStatus("Audio preview blocked: " + err.message, true));
+    $("audPlay").textContent = "Stop";
+    $("audPlay").classList.add("on");
+  } else {
+    audioEl.pause();
+    $("audPlay").textContent = "Preview";
+    $("audPlay").classList.remove("on");
+  }
+};
+
+$("audClear").onclick = () => {
+  if (audioEl) { audioEl.pause(); URL.revokeObjectURL(audioEl.src); audioEl = null; }
+  audioEnv = null; audioName = null; audioDur = 0;
+  for (const band of Object.keys(BANDS)) audioLevel[band] = 0;
+  $("audName").textContent = "no audio loaded";
+  $("audPlay").disabled = true; $("audPlay").textContent = "Preview";
+  $("audPlay").classList.remove("on");
+  $("audClear").disabled = true;
+  pushUniforms(); audMeters(); syncSliders(); laneHead();
+  setStatus("Audio cleared.");
+};
 
 $("savePreset").onclick = () => {
   const blob = new Blob([JSON.stringify(serialize(), null, 2)], { type: "application/json" });

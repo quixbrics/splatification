@@ -362,6 +362,91 @@ leave it there.
 
 ---
 
+## Audio-reactive drive
+
+Roadmap item 6, and per the intro the reason this exists rather than an AE
+plugin.
+
+### Analysed offline, never sampled live
+
+The audio is analysed **once, offline**, into a per-band amplitude envelope.
+It is deliberately not tapped from a live `AnalyserNode`. The offline export
+loop does not run at wall-clock speed, so a realtime tap would drift out of
+sync the moment you rendered, and the same project would produce a different
+result on every run. A precomputed envelope indexed by timeline position makes
+scrubbing, playback and export read identical values. Anything else is a demo,
+not a tool.
+
+Band separation uses `OfflineAudioContext` + biquad highpass/lowpass per band
+rather than a hand-rolled FFT — same result, built-in DSP, no numerical code to
+own. Bands: low 20–200, mid 200–2000, high 2000–16000 Hz. Each band is RMS'd
+into a 200 Hz envelope and **normalised to its own peak**, so a given `depth`
+means the same amount of visible effect regardless of the material.
+
+Timeline mapping is 1:1 with the clock (`playhead * dur` seconds into the
+track), not stretched to fit, so changing Duration changes how much of the
+track is used — what you want when cutting to a specific passage.
+
+`Preview` plays the track so you can hear it against the animation. It is not
+what drives the parameters; the offline envelope always is. So an export
+matches what you heard even though nothing is playing during the render.
+
+### Audio modulates, it does not replace
+
+```
+V[id] = (envelope or manual value) + depth × parameterRange × bandLevel
+```
+
+clamped to the parameter's own range. Audio is a modulation **on top of** the
+base value so it layers with envelopes instead of fighting them: the envelope
+sets the move, audio adds the detail. Verified — `scale` with an envelope
+reading 1.235 at t=3 became 1.422 with a high-band route at depth 0.4, exactly
+the base plus `0.4 × 2.95 × 0.16`.
+
+`depth` is a fraction of the parameter's full range and is signed, so a route
+can push either way.
+
+### Verified against a synthetic file
+
+Correctness here is not eyeballable, so the test fixture is deterministic:
+60 Hz for 0–2s, 800 Hz for 2–4s, 6 kHz for 4–6s. Each band must peak in its own
+third. Regenerate with:
+
+```
+ffmpeg -y -f lavfi -i "sine=frequency=60:duration=6" \
+ -f lavfi -i "sine=frequency=800:duration=6" \
+ -f lavfi -i "sine=frequency=6000:duration=6" \
+ -filter_complex "[0:a]volume='if(lt(t,2),1,0)':eval=frame[a];\
+ [1:a]volume='if(between(t,2,4),1,0)':eval=frame[b];\
+ [2:a]volume='if(gt(t,4),1,0)':eval=frame[c];\
+ [a][b][c]amix=inputs=3:normalize=0[out]" -map "[out]" -ar 44100 bandtest.wav
+```
+
+Measured (low / mid / high):
+
+| t | 1s | 3s | 5s |
+|---|---|---|---|
+| low | **0.78** | 0.04 | 0.00 |
+| mid | 0.10 | **1.00** | 0.09 |
+| high | 0.00 | 0.16 | **1.00** |
+
+Off-band bleed of 0.09–0.16 is the second-order biquad skirt, not a defect.
+
+### Focus must not mutate
+
+The `◆` glyph both keys and focuses. That made routing audio impossible without
+silently starting an envelope on the parameter — the first attempt at this
+produced three unwanted envelopes and the status line said so. **Clicking a
+parameter's name focuses it without touching anything.** Keep any future focus
+affordance non-destructive.
+
+Relatedly, `syncSliders()` originally keyed off `hasEnv(id)` alone, which left
+audio-modulated sliders sitting at their manual position while the shader used
+something else. It now uses `isDriven(id)` — envelope *or* audio. This file has
+been bitten before by a panel that lies about the state; do not reintroduce it.
+
+---
+
 ## Presets — save/load as JSON
 
 Envelopes alone do not round-trip a scene. A disarmed parameter reads from `P`,
@@ -378,14 +463,17 @@ point of a small shareable text file. Loading a preset does not load a capture.
 ```json
 {
   "format": "splat-bench-preset",
-  "version": 1,
+  "version": 3,
   "saved": "…", "asset": "butterfly.spz",
   "params":    { "cullA": 0.3, … },        // all 18, manual values (P, not V)
   "toggles":   { "revFlip": true, … },
   "output":    { "res": "1920x1080", "fps": "30" },
   "camera":    { "A": {"pos":[…],"tgt":[…]}, "B": … },
   "envelopes": { "revY": { "on": true, "smooth": true,
-                           "keys": [{"t":0,"v":0},{"t":1,"v":1}] } }
+                           "keys": [{"t":0,"v":0},{"t":1,"v":1}] } },
+  "selects":   { "rgMode": "crop", "rgShape": "box", … },      // v2
+  "audio":     { "name": "track.wav",                          // v3
+                 "routes": { "dAmt": {"band":"low","depth":0.6} } }
 }
 ```
 
@@ -528,8 +616,10 @@ without re-testing export.
    colorize across six shapes, animatable and persisted like any other
    parameter.
 5. Depth pass output for compositing.
-6. Audio-reactive parameter drive (Web Audio FFT → uniforms). This is the reason
-   for building this rather than using an AE plugin.
+6. ~~Audio-reactive parameter drive (Web Audio FFT → uniforms).~~ **Done** —
+   see the Audio-reactive drive section above. Offline three-band analysis,
+   signed depth per parameter, layered on top of envelopes, persisted as
+   routing in presets.
 7. Mobile: `lod: true` plus reduced pixel ratio, gated behind a toggle.
 8. Multiple `SplatMesh` instances in one scene with independent transforms.
    **Deferred to last on 2026-08-16** — not needed at this stage. Nothing is

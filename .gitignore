@@ -15,3 +15,10 @@
 
 # Exported video
 *.mp4
+
+# Audio. Test fixtures are regenerable — see NOTES.md for the ffmpeg command.
+*.wav
+*.mp3
+*.ogg
+*.m4a
+*.flac
