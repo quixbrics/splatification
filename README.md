@@ -47,6 +47,11 @@ analysed offline into per-band envelopes rather than sampled live, so scrubbing,
 playback and export all agree. Click a parameter's name to focus it, then pick a band
 in the lane. Audio layers on top of envelopes rather than replacing them.
 
+**Adjust** binds up to two parameters to the drag axes so you can change them on
+the viewport itself, with the splat visible — tap chips to assign X and Y, then
+drag. Useful on desktop, essential on a phone where the control rail covers the
+subject.
+
 Every parameter has a `↺` reset button, which brightens when the value differs
 from its default, and a `◆` keyframe button.
 

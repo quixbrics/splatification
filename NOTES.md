@@ -257,7 +257,13 @@ edit (opacity 1, white, multiply), not a detachment.
 One consequence: attaching the edit on load does trigger one generator rebuild,
 and for a frame or two during it **the mesh renders as nothing**. A probe taken
 immediately after load reads 0 coverage and looks like total failure. It is
-transient — re-probe once settled. This cost two false diagnoses.
+transient — re-probe once settled.
+
+**This has now produced four false readings**, including a whole regression
+sweep that came back as zeros. A single warm-up `settled()` is not always
+enough. Before trusting any measurement after a load, probe in a loop until two
+consecutive reads agree, and treat an all-zero sweep as "not warm yet" until
+proven otherwise.
 
 ### radius vs scale is per-shape, and getting it wrong fails silently
 
@@ -502,6 +508,27 @@ It is deliberately **not** in presets — it describes the device you are at, no
 the look. A preset saved on a desktop must not force a phone to full pixel
 ratio.
 
+### iOS file pickers and `accept`
+
+`accept="audio/*"` greys out every audio file in the iOS Files picker — it
+matches against the system UTI rather than the extension, so ordinary
+.wav/.mp3/.aiff on disk fail the filter and cannot be selected at all. The fix
+is to list explicit extensions alongside the wildcard. The same trap applies to
+the splat picker if it ever needs broadening.
+
+### Audio follows the transport
+
+Play/pause/scrub drive the audio element. This is **monitoring only** — the
+parameters are always driven by the offline envelope, so an export still
+matches what you heard even though nothing plays during a render. The coupling
+is deliberately one-way: letting audio `timeupdate` drive `playhead` would make
+the timeline jitter with the audio clock and fight scrubbing.
+
+Rapid transport toggling supersedes an in-flight `play()` with a `pause()`,
+which rejects as `AbortError`. That is the intended outcome, not a failure —
+it is swallowed, because surfacing it put a red warning on the panel during
+completely normal use.
+
 ### `nonLod` is required, and `lodAbove` is a floor
 
 Spark's loader returns **only** `{ lodSplats }` when it builds a LOD tree,
@@ -532,6 +559,51 @@ style. A hidden tab does not advance CSS transitions, so the computed value
 stays frozen at its start. Setting `transition: none` before measuring gives
 the true value (top 152, exactly as designed). Same family as the rAF stall
 behind `?debug=1`.
+
+---
+
+## Gesture mode — direct manipulation
+
+On a phone the rail covers the subject, so adjusting a slider means not seeing
+what it does. `Adjust` binds up to two parameters to the drag axes and edits
+them on the viewport itself. It works on desktop too — a mouse drag is a drag.
+
+Chips cycle **unbound → X → Y → unbound** on single taps; binding an axis that
+is already held displaces the previous holder rather than refusing. A full drag
+across the stage sweeps the parameter's full range, and drags are relative to
+where the pointer went down, so repeated strokes keep nudging.
+
+Two decisions worth keeping:
+
+- **It writes through the slider's own `input` event**, never to `P` directly.
+  That is the single path already handling auto-key on armed envelopes, dirty
+  marking, the `dpr`/`dur` side effects and `pushUniforms`. A second write path
+  would drift out of sync with it. Verified: dragging with an armed envelope
+  adds a keyframe, exactly as dragging the slider does.
+- **Orbit and adjust are modal, not gesture-count-based** (one finger vs two).
+  On a trackpad and on a phone those are easy to confuse, and a mis-detected
+  gesture silently edits a parameter instead of moving the camera. An explicit
+  mode is duller and much harder to get wrong. `controls.enabled` is the
+  interlock, so the two can never both be live.
+
+---
+
+## Colour
+
+Three accents, and they mean different things. Do not reach for a fourth
+without a reason.
+
+| token | use |
+|---|---|
+| `--signal` mint | values, readouts, audio routing |
+| `--live` orange | transport, recording, a key **at** the playhead |
+| `--edit` violet | automation affordances: armed envelopes, changed-from-default, gesture bindings |
+
+The reset and key glyphs originally sat on `--rule`, which is the *border*
+colour — near invisible against the chassis by design. They now idle at
+`--ink-dim` at 55% opacity and go to `--edit` when they carry state, at 16px
+desktop / 26px mobile. Idle-but-legible beats invisible: these are the only
+indication that a parameter is automated.
 
 ---
 

@@ -14,6 +14,11 @@
     --ink-dim:#737b86;
     --signal:#9fe0d4;
     --live:#ff5a3c;
+    /* Third accent, for automation affordances only. The reset and key glyphs
+       previously sat on --rule, which is the border colour — near invisible
+       against the chassis by design. Automation state needs to be legible at a
+       glance without competing with --signal (values) or --live (transport). */
+    --edit:#b48ce8;
     --rail:340px;
     --dock:64px;
     --lane:88px;
@@ -80,18 +85,63 @@
      whose parameter is deliberately not animatable. */
   .key{
     appearance:none; background:none; border:0; padding:0; margin:0;
-    width:13px; height:13px; line-height:13px; text-align:center;
-    font:inherit; font-size:9px; cursor:pointer;
-    color:var(--rule); transition:color .12s;
+    width:16px; height:16px; line-height:16px; text-align:center;
+    font:inherit; font-size:11px; cursor:pointer;
+    color:var(--ink-dim); opacity:.55; transition:color .12s, opacity .12s;
   }
-  .key:hover{color:var(--signal)}
-  .key.armed{color:var(--ink-dim)}
-  .key.onkey{color:var(--live)}
-  .key.aud{color:var(--signal)}
+  .key:hover{color:var(--signal); opacity:1}
+  /* Automation state, in increasing order of "something is driving this". */
+  .key.armed{color:var(--edit); opacity:1}
+  .key.aud{color:var(--signal); opacity:1}
+  .key.onkey{color:var(--live); opacity:1}
   .key.aud.onkey{color:var(--live)}
-  .key.focused{text-shadow:0 0 6px currentColor}
+  .key.focused{text-shadow:0 0 7px currentColor; opacity:1}
   .key:focus-visible{outline:1px solid var(--signal); outline-offset:1px}
   .key.ghost{visibility:hidden; cursor:default}
+
+  /* Tool palette + gesture mode ---------------------------------------- */
+  #gestureToggle{
+    position:fixed; z-index:20; left:12px;
+    bottom:calc(var(--dock) + var(--lane) + 10px);
+  }
+  #palette{
+    position:fixed; z-index:19; left:0; right:var(--rail);
+    bottom:calc(var(--dock) + var(--lane) + 46px);
+    padding:7px 12px 9px;
+    background:color-mix(in srgb, var(--chassis) 88%, transparent);
+    border-top:1px solid var(--rule); border-bottom:1px solid var(--rule);
+  }
+  #palette.hide{display:none}
+  #paletteAxes{display:flex; align-items:center; gap:14px; margin-bottom:7px}
+  #paletteAxes .ax{color:var(--ink-dim); letter-spacing:.05em}
+  #paletteAxes .ax b{
+    display:inline-block; width:15px; font-weight:400; color:var(--edit);
+  }
+  #paletteAxes .ax span{color:var(--signal)}
+  #paletteAxes .sp{flex:1}
+  #paletteChips{
+    display:flex; gap:6px; overflow-x:auto; padding-bottom:2px;
+    scrollbar-width:none;
+  }
+  #paletteChips::-webkit-scrollbar{display:none}
+  .chip{
+    flex:0 0 auto; padding:4px 9px; cursor:pointer;
+    background:var(--chassis-hi); border:1px solid var(--rule); color:var(--ink-dim);
+    font:inherit; letter-spacing:.04em; white-space:nowrap;
+  }
+  .chip:hover{border-color:var(--ink-dim); color:var(--ink)}
+  .chip.bx, .chip.by{color:var(--edit); border-color:var(--edit)}
+  .chip b{font-weight:400; color:var(--edit); margin-right:5px}
+  /* While dragging, the viewport must not pan/zoom the page under the finger. */
+  body.gesture #stage, body.gesture #stage canvas{touch-action:none}
+  body.gesture #stage{outline:1px solid var(--edit); outline-offset:-2px}
+  #gestureHud{
+    position:fixed; z-index:21; left:12px; pointer-events:none;
+    bottom:calc(var(--dock) + var(--lane) + 46px);
+    color:var(--signal); font-variant-numeric:tabular-nums;
+    background:var(--chassis); border:1px solid var(--edit); padding:6px 10px;
+  }
+  #gestureHud.hide{display:none}
 
   #osd{
     position:fixed; left:16px; top:14px; pointer-events:none;
@@ -131,13 +181,13 @@
      so the panel doubles as an at-a-glance "what have I changed" readout. */
   .rst{
     appearance:none; background:none; border:0; padding:0; margin:0;
-    width:13px; height:13px; line-height:13px; text-align:center;
-    font:inherit; font-size:11px; cursor:pointer;
-    color:var(--rule); transition:color .12s;
+    width:16px; height:16px; line-height:16px; text-align:center;
+    font:inherit; font-size:13px; cursor:pointer;
+    color:var(--ink-dim); opacity:.55; transition:color .12s, opacity .12s;
   }
-  .rst:hover{color:var(--signal); border-color:transparent}
+  .rst:hover{color:var(--signal); opacity:1; border-color:transparent}
   .rst:focus-visible{outline:1px solid var(--signal); outline-offset:1px}
-  .rst.dirty{color:var(--ink-dim)}
+  .rst.dirty{color:var(--edit); opacity:1}
   .rst.dirty:hover{color:var(--signal)}
 
   input[type=range]{-webkit-appearance:none; appearance:none; background:transparent; height:14px; margin:0 0 3px}
@@ -202,10 +252,12 @@
     #transport{ gap:9px; padding:0 10px }
     #clock{ min-width:96px; font-size:10px }
     /* Touch targets: a 13px glyph is not tappable. */
-    .rst, .key{ width:22px; height:22px; line-height:22px; font-size:12px }
+    .rst, .key{ width:26px; height:26px; line-height:26px; font-size:15px; opacity:.75 }
     .row{ grid-template-columns:1fr auto auto 54px; margin-bottom:11px }
     .row input[type=range]{ height:22px }
     button, select{ padding:5px 9px }
+    .chip{ padding:8px 12px }
+    #palette{ bottom:calc(var(--dock) + var(--lane) + 44px) }
   }
 
 </style>
@@ -234,6 +286,21 @@
 
   <!-- Mobile only: the rail is a bottom sheet there, this opens it. -->
   <button id="panelToggle" aria-expanded="false">Controls</button>
+
+  <!-- Direct manipulation. Bind parameters to the drag axes and adjust them
+       on the viewport itself, so the splat stays visible while you work —
+       the whole point on a phone, where the rail covers the subject. -->
+  <button id="gestureToggle" aria-pressed="false" title="Adjust parameters by dragging on the viewport">Adjust</button>
+  <div id="gestureHud" class="hide"></div>
+  <div id="palette" class="hide" aria-hidden="true">
+    <div id="paletteAxes">
+      <span class="ax"><b>X</b><span id="axX">unbound</span></span>
+      <span class="ax"><b>Y</b><span id="axY">unbound</span></span>
+      <span class="sp"></span>
+      <button id="paletteClear">Unbind</button>
+    </div>
+    <div id="paletteChips"></div>
+  </div>
   <div id="drop">
     <h1>Splat Bench</h1>
     <p>Drop a <strong>.ply</strong> / .spz / .splat / .sog file here, or load the test asset to check the pipeline.</p>
@@ -413,7 +480,7 @@
     <h2>Audio <em>fft drive</em></h2>
     <div class="btns" style="margin-bottom:9px">
       <button id="audLoad">Load audio</button>
-      <button id="audPlay" disabled>Preview</button>
+      <button id="audMute" disabled>Mute</button>
       <button id="audClear" disabled>Clear</button>
     </div>
     <div id="audName" style="color:var(--ink-dim); margin-bottom:8px">no audio loaded</div>
@@ -451,7 +518,12 @@
 
 <input type="file" id="file" accept=".ply,.spz,.splat,.ksplat,.sog,.zip,.rad" hidden>
 <input type="file" id="presetFile" accept=".json,application/json" hidden>
-<input type="file" id="audioFile" accept="audio/*" hidden>
+<!-- iOS Safari greys out everything in Files when `accept` is a bare
+     `audio/*` wildcard — it matches against the system UTI rather than the
+     extension, so ordinary .wav/.mp3/.aiff on disk fail the filter. Listing
+     explicit extensions alongside the wildcard makes them selectable. -->
+<input type="file" id="audioFile" hidden
+       accept="audio/*,.wav,.mp3,.m4a,.aac,.ogg,.oga,.opus,.flac,.aif,.aiff,.caf,.webm">
 
 <script type="module">
 /* ------------------------------------------------------------------ *
@@ -1028,6 +1100,7 @@ function setPlayhead(t) {
   syncSliders();
   refreshKeyBtns();
   audMeters();
+  audioSeek();
   drawLane();
 }
 
@@ -1424,7 +1497,7 @@ addEventListener("drop", async (e) => {
   document.body.classList.remove("dragging");
   const f = e.dataTransfer.files?.[0]; if (!f) return;
   if (/\.json$/i.test(f.name)) { readPreset(f); return; }
-  if (/^audio\//i.test(f.type) || /\.(mp3|wav|ogg|m4a|aac|flac)$/i.test(f.name)) {
+  if (/^audio\//i.test(f.type) || /\.(mp3|wav|ogg|oga|opus|m4a|aac|flac|aif|aiff|caf|webm)$/i.test(f.name)) {
     loadAudio(f); return;
   }
   loadSplat({ bytes: new Uint8Array(await f.arrayBuffer()), name: f.name }, f.name);
@@ -1476,6 +1549,7 @@ $("play").onclick = () => {
   playing = !playing;
   $("play").textContent = playing ? "Pause" : "Play";
   $("play").classList.toggle("on", playing);
+  audioFollow();
 };
 $("scrub").addEventListener("input", (e) => setPlayhead(parseFloat(e.target.value)));
 
@@ -1485,7 +1559,9 @@ function frame(now) {
   const dt = Math.min((now - lastT) / 1000, 0.1);
   lastT = now;
   if (playing) {
+    const prev = playhead;
     playhead = (playhead + dt / P.dur) % 1;
+    if (playhead < prev) audioSeek();        // looped — pull audio back with it
     $("scrub").value = playhead;
     pushUniforms();
     updateClock();
@@ -1538,6 +1614,7 @@ $("render").onclick = async () => {
   const savedPlayhead = playhead;
 
   rendering = true;
+  audioFollow();                            // silence monitoring during a render
   $("render").classList.add("live");
   $("t-state").textContent = "rendering";
 
@@ -1761,6 +1838,126 @@ function applyPreset(o) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Gesture mode — direct manipulation on the viewport
+ *
+ * On a phone the rail covers the subject, so adjusting a slider means not
+ * seeing what it does. Bind up to two parameters to the drag axes and adjust
+ * them on the viewport itself, with the splat fully visible.
+ *
+ * Deliberately routed through the slider's own `input` event rather than
+ * writing P directly: that is the single path that already handles auto-key
+ * on armed envelopes, dirty marking, the dpr/dur side effects and
+ * pushUniforms. A second write path would drift out of sync with it.
+ *
+ * Orbit and adjust are modal rather than gesture-count-based (one finger vs
+ * two). On a trackpad and on a phone the two are easy to confuse, and a
+ * mis-detected gesture silently edits a parameter instead of moving the
+ * camera. An explicit mode is duller and much harder to get wrong.
+ * ------------------------------------------------------------------ */
+const GEST = { x: null, y: null };
+let gestureOn = false;
+let gdrag = null;
+
+const paramLabel = (id) =>
+  $("p-" + id).parentElement.querySelector("label")?.textContent.trim() ?? id;
+
+function paintPalette() {
+  for (const chip of document.querySelectorAll(".chip")) {
+    const id = chip.dataset.id;
+    const isX = GEST.x === id, isY = GEST.y === id;
+    chip.classList.toggle("bx", isX);
+    chip.classList.toggle("by", isY);
+    chip.querySelector("b").textContent = isX ? "X" : isY ? "Y" : "";
+  }
+  $("axX").textContent = GEST.x ? paramLabel(GEST.x) : "unbound";
+  $("axY").textContent = GEST.y ? paramLabel(GEST.y) : "unbound";
+}
+
+/* One chip, one tap: unbound -> X -> Y -> unbound. Binding an axis that is
+   already taken displaces the previous holder rather than refusing. */
+function cycleChip(id) {
+  if (GEST.x === id)      { GEST.x = null; GEST.y = id; }
+  else if (GEST.y === id) { GEST.y = null; }
+  else                    { GEST.x = id; }
+  if (GEST.x && GEST.x === GEST.y) GEST.y = null;
+  paintPalette();
+}
+
+for (const id of ANIM) {
+  const chip = document.createElement("button");
+  chip.type = "button";
+  chip.className = "chip";
+  chip.dataset.id = id;
+  chip.innerHTML = "<b></b>";
+  chip.append(paramLabel(id));
+  chip.addEventListener("click", () => cycleChip(id));
+  $("paletteChips").append(chip);
+}
+paintPalette();
+
+function setGesture(on) {
+  gestureOn = on;
+  controls.enabled = !on;                 // modal: never both at once
+  document.body.classList.toggle("gesture", on);
+  $("gestureToggle").textContent = on ? "Orbit" : "Adjust";
+  $("gestureToggle").classList.toggle("on", on);
+  $("gestureToggle").setAttribute("aria-pressed", String(on));
+  $("palette").classList.toggle("hide", !on);
+  $("palette").setAttribute("aria-hidden", String(!on));
+  if (!on) hud(false);
+}
+
+$("gestureToggle").onclick = () => setGesture(!gestureOn);
+$("paletteClear").onclick = () => { GEST.x = GEST.y = null; paintPalette(); };
+
+function hud(show) {
+  const el = $("gestureHud");
+  if (!show || (!GEST.x && !GEST.y)) { el.classList.add("hide"); return; }
+  const line = (ax) => {
+    const id = GEST[ax];
+    if (!id) return "";
+    const digits = SPEC.find(([sid]) => sid === id)?.[1] ?? 2;
+    return `${ax.toUpperCase()}  ${paramLabel(id)}  ${readout(id, digits, V[id])}`;
+  };
+  el.textContent = [line("x"), line("y")].filter(Boolean).join("\n");
+  el.style.whiteSpace = "pre";
+  el.classList.remove("hide");
+}
+
+function applyAxis(ax, frac) {
+  const id = GEST[ax];
+  if (!id || !gdrag) return;
+  const el = $("p-" + id);
+  const lo = parseFloat(el.min), hi = parseFloat(el.max);
+  el.value = clampNum(gdrag.vals[id] + frac * (hi - lo), lo, hi);
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+renderer.domElement.addEventListener("pointerdown", (e) => {
+  if (!gestureOn || (!GEST.x && !GEST.y)) return;
+  const vals = {};
+  for (const ax of ["x", "y"]) {
+    const id = GEST[ax];
+    if (id) vals[id] = parseFloat($("p-" + id).value);
+  }
+  gdrag = { px: e.clientX, py: e.clientY, vals,
+           w: Math.max(stage.clientWidth, 1), h: Math.max(stage.clientHeight, 1) };
+  renderer.domElement.setPointerCapture(e.pointerId);
+  hud(true);
+});
+
+addEventListener("pointermove", (e) => {
+  if (!gdrag) return;
+  applyAxis("x", (e.clientX - gdrag.px) / gdrag.w);
+  applyAxis("y", -(e.clientY - gdrag.py) / gdrag.h);   // up increases, as a fader would
+  hud(true);
+});
+
+for (const ev of ["pointerup", "pointercancel"]) {
+  addEventListener(ev, () => { if (gdrag) { gdrag = null; hud(false); } });
+}
+
+/* ------------------------------------------------------------------ *
  * Audio controls
  * ------------------------------------------------------------------ */
 $("audBand").onchange = () => {
@@ -1795,8 +1992,9 @@ async function loadAudio(file) {
     audioEl.preload = "auto";
 
     $("audName").textContent = `${audioName} — ${audioDur.toFixed(1)}s`;
-    $("audPlay").disabled = false;
+    $("audMute").disabled = false;
     $("audClear").disabled = false;
+    audioFollow();
     setStatus(`${audioName} analysed — ${audioDur.toFixed(1)}s, 3 bands.`);
     pushUniforms();
     audMeters();
@@ -1811,21 +2009,44 @@ $("audioFile").onchange = (e) => {
   e.target.value = "";
 };
 
-/* Preview is a convenience for hearing the track against the animation. It
-   is NOT what drives the parameters — that is always the offline envelope,
-   so an export matches what you heard even though nothing is playing. */
-$("audPlay").onclick = () => {
+/* Audio follows the transport. Playback is NOT what drives the parameters —
+   that is always the offline envelope — so an export still matches what you
+   heard even though nothing plays during a render. This is monitoring only.
+
+   Kept deliberately one-way: the transport drives the audio element, never
+   the reverse. Letting audio timeupdate drive `playhead` would make the
+   timeline jitter with the audio clock and fight scrubbing. */
+let muted = false;
+
+function audioSeek() {
+  if (!audioEl || !audioDur) return;
+  const t = Math.min(playhead * P.dur, Math.max(audioDur - 0.01, 0));
+  if (Math.abs(audioEl.currentTime - t) > 0.06) audioEl.currentTime = t;
+}
+
+function audioFollow() {
   if (!audioEl) return;
-  if (audioEl.paused) {
-    audioEl.currentTime = Math.min(playhead * P.dur, Math.max(audioDur - 0.01, 0));
-    audioEl.play().catch((err) => setStatus("Audio preview blocked: " + err.message, true));
-    $("audPlay").textContent = "Stop";
-    $("audPlay").classList.add("on");
-  } else {
+  const want = playing && !muted && !rendering && playhead * P.dur < audioDur;
+  if (want && audioEl.paused) {
+    audioSeek();
+    audioEl.play().catch((err) => {
+      /* Toggling the transport quickly supersedes an in-flight play() with a
+         pause(), which rejects as AbortError. That is the intended outcome,
+         not a failure — reporting it puts a red warning on the panel for
+         normal use. Only a genuine block (autoplay policy) is worth saying. */
+      if (err.name === "AbortError") return;
+      setStatus("Audio blocked: " + err.message, true);
+    });
+  } else if (!want && !audioEl.paused) {
     audioEl.pause();
-    $("audPlay").textContent = "Preview";
-    $("audPlay").classList.remove("on");
   }
+}
+
+$("audMute").onclick = () => {
+  muted = !muted;
+  $("audMute").textContent = muted ? "Unmute" : "Mute";
+  $("audMute").classList.toggle("on", muted);
+  audioFollow();
 };
 
 $("audClear").onclick = () => {
@@ -1833,8 +2054,7 @@ $("audClear").onclick = () => {
   audioEnv = null; audioName = null; audioDur = 0;
   for (const band of Object.keys(BANDS)) audioLevel[band] = 0;
   $("audName").textContent = "no audio loaded";
-  $("audPlay").disabled = true; $("audPlay").textContent = "Preview";
-  $("audPlay").classList.remove("on");
+  $("audMute").disabled = true;
   $("audClear").disabled = true;
   pushUniforms(); audMeters(); syncSliders(); laneHead();
   setStatus("Audio cleared.");
@@ -1895,6 +2115,8 @@ if (new URLSearchParams(location.search).has("debug")) {
     get V()    { return V; },
     get P()    { return P; },
     get ENV()  { return ENV; },
+    get audio(){ return audioEl; },
+    get gest() { return GEST; },
     draw() {
       pushUniforms();
       driveCamera();
