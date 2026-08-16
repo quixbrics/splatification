@@ -15,6 +15,8 @@
     --signal:#9fe0d4;
     --live:#ff5a3c;
     --rail:340px;
+    --dock:64px;
+    --lane:88px;
     --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   }
   *{box-sizing:border-box}
@@ -26,17 +28,54 @@
   }
   canvas{display:block}
 
-  #stage{position:fixed; inset:0 var(--rail) 64px 0; background:var(--void)}
+  #stage{position:fixed; inset:0 var(--rail) calc(var(--dock) + var(--lane)) 0; background:var(--void)}
   #rail{
     position:fixed; top:0; right:0; bottom:0; width:var(--rail);
     background:var(--chassis); border-left:1px solid var(--rule);
     overflow-y:auto; overscroll-behavior:contain;
   }
   #transport{
-    position:fixed; left:0; right:var(--rail); bottom:0; height:64px;
+    position:fixed; left:0; right:var(--rail); bottom:0; height:var(--dock);
     background:var(--chassis); border-top:1px solid var(--rule);
     display:flex; align-items:center; gap:14px; padding:0 16px;
   }
+
+  /* Envelope lane ---------------------------------------------------- */
+  #lane{
+    position:fixed; left:0; right:var(--rail); bottom:var(--dock); height:var(--lane);
+    background:var(--chassis); border-top:1px solid var(--rule);
+    display:flex; flex-direction:column;
+  }
+  #laneHead{display:flex; align-items:center; gap:7px; padding:5px 16px 2px}
+  #laneName{
+    color:var(--signal); letter-spacing:.08em; text-transform:uppercase;
+    font-size:10px; white-space:nowrap;
+  }
+  #laneRange{color:var(--rule); font-variant-numeric:tabular-nums; font-size:10px}
+  #laneHead .sp{flex:1}
+  #laneHead button{padding:1px 7px; font-size:10px}
+  #laneWrap{position:relative; flex:1; min-height:0}
+  #laneCanvas{width:100%; height:100%; cursor:crosshair; touch-action:none}
+  #laneHint{
+    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    color:var(--rule); pointer-events:none; letter-spacing:.1em; text-transform:uppercase;
+  }
+  #laneHint.hide{display:none}
+
+  /* Per-parameter keyframe button. Ghost keeps the grid aligned on rows
+     whose parameter is deliberately not animatable. */
+  .key{
+    appearance:none; background:none; border:0; padding:0; margin:0;
+    width:13px; height:13px; line-height:13px; text-align:center;
+    font:inherit; font-size:9px; cursor:pointer;
+    color:var(--rule); transition:color .12s;
+  }
+  .key:hover{color:var(--signal)}
+  .key.armed{color:var(--ink-dim)}
+  .key.onkey{color:var(--live)}
+  .key.focused{text-shadow:0 0 6px currentColor}
+  .key:focus-visible{outline:1px solid var(--signal); outline-offset:1px}
+  .key.ghost{visibility:hidden; cursor:default}
 
   #osd{
     position:fixed; left:16px; top:14px; pointer-events:none;
@@ -66,7 +105,7 @@
   }
   .mod > h2 em{font-style:normal; color:var(--rule)}
 
-  .row{display:grid; grid-template-columns:1fr auto 54px; gap:8px; align-items:center; margin-bottom:7px}
+  .row{display:grid; grid-template-columns:1fr auto auto 54px; gap:8px; align-items:center; margin-bottom:7px}
   .row label{color:var(--ink-dim); letter-spacing:.05em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
   .row output{color:var(--signal); text-align:right; font-variant-numeric:tabular-nums; letter-spacing:.02em}
   .row input[type=range]{grid-column:1 / -1; width:100%}
@@ -142,6 +181,21 @@
       <button id="pick">Choose file</button>
       <button id="demo">Load test asset</button>
     </div>
+  </div>
+</div>
+
+<div id="lane">
+  <div id="laneHead">
+    <span id="laneName">no parameter focused</span>
+    <span id="laneRange"></span>
+    <span class="sp"></span>
+    <button id="envOn" title="Arm or disarm this envelope">Off</button>
+    <button id="envMode" title="Interpolation between keys">Smooth</button>
+    <button id="envClear" title="Delete every key on this parameter">Clear</button>
+  </div>
+  <div id="laneWrap">
+    <canvas id="laneCanvas"></canvas>
+    <div id="laneHint">click a &#9670; to focus a parameter</div>
   </div>
 </div>
 
@@ -321,6 +375,10 @@ function resize() {
   renderer.domElement.style.height = h + "px";
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
+  /* Deliberately NOT calling laneFit() here. resize() runs during module
+     evaluation, well before the lane's consts exist — calling it would throw
+     a TDZ error and kill everything below, which is exactly how v1 died. The
+     lane sizes itself from CSS and has its own resize listener. */
 }
 addEventListener("resize", resize);
 resize();
@@ -428,11 +486,13 @@ const SPEC = [
    exponentially onto the threshold. The `* radius` normalisation stays —
    it was never the problem, the range was. */
 const CULL_MIN = 0.0002, CULL_MAX = 0.1;
-const cullSize = () => CULL_MIN * Math.pow(CULL_MAX / CULL_MIN, P.cullS);
+const cullSize = (u) => CULL_MIN * Math.pow(CULL_MAX / CULL_MIN, u);
 
-/* Readout override for parameters whose slider position is not the value. */
-const SHOW = { cullS: () => cullSize().toFixed(4) };
-const readout = (id, digits) => SHOW[id] ? SHOW[id]() : P[id].toFixed(digits);
+/* Readout override for parameters whose slider position is not the value.
+   Takes the value explicitly so the same formatter serves both the manual
+   slider value and an envelope-driven one. */
+const SHOW = { cullS: (v) => cullSize(v).toFixed(4) };
+const readout = (id, digits, v) => SHOW[id] ? SHOW[id](v) : v.toFixed(digits);
 
 /* Snapped defaults, captured before any listener can fire. A slider whose
    `value` attribute is not on its own min/step grid gets silently rounded by
@@ -441,18 +501,68 @@ const readout = (id, digits) => SHOW[id] ? SHOW[id]() : P[id].toFixed(digits);
    for a declared 0.15. Capturing the real boot value makes reset exact. */
 const DEFAULT = {};
 
+/* ------------------------------------------------------------------ *
+ * Envelopes — per-parameter automation curves
+ *
+ * Previously one global `playhead` drove everything and the camera had
+ * exactly two keyframes, so "animation" meant a single linear sweep of
+ * whatever happened to be wired to it. An envelope is an ordered keyframe
+ * list for one parameter. When armed it overrides that parameter's slider,
+ * and the slider becomes a live readout of the curve.
+ *
+ * P holds the manual slider value and is never overwritten by an envelope,
+ * so disarming restores exactly what the user last dialled in.
+ * V holds the effective value for the current playhead. Everything
+ * downstream — uniforms, camera, readouts, export — reads V.
+ *
+ * Structural parameters are deliberately not animatable: animating the
+ * clip duration, bitrate, sort settle or pixel ratio is either meaningless
+ * or would make an export non-reproducible.
+ * ------------------------------------------------------------------ */
+const NO_ANIM = new Set(["dur", "br", "settle", "dpr"]);
+const ANIM = SPEC.map(([id]) => id).filter((id) => !NO_ANIM.has(id));
+
+const ENV = {};                     // id -> { on, smooth, keys:[{t,v}] }
+const envOf = (id) => (ENV[id] ??= { on: false, smooth: true, keys: [] });
+const hasEnv = (id) => { const e = ENV[id]; return !!(e && e.on && e.keys.length); };
+const KEY_EPS = 1e-3;               // playhead tolerance for "a key is here"
+
+const smooth01 = (x) => x * x * (3 - 2 * x);
+
+function envValue(id, t) {
+  const k = ENV[id].keys;
+  if (k.length === 1) return k[0].v;
+  if (t <= k[0].t) return k[0].v;
+  if (t >= k[k.length - 1].t) return k[k.length - 1].v;
+  let i = 0;
+  while (i < k.length - 2 && k[i + 1].t <= t) i++;
+  const a = k[i], b = k[i + 1];
+  let u = (t - a.t) / Math.max(b.t - a.t, 1e-9);
+  if (ENV[id].smooth) u = smooth01(u);
+  return a.v + (b.v - a.v) * u;
+}
+
+const V = {};
+function evalParams() {
+  for (const [id] of SPEC) V[id] = hasEnv(id) ? envValue(id, playhead) : P[id];
+}
+
 for (const [id, digits] of SPEC) {          // pass 1: values only
   DEFAULT[id] = $("p-" + id).value;
   P[id] = parseFloat($("p-" + id).value);
-  $("o-" + id).textContent = readout(id, digits);
+  $("o-" + id).textContent = readout(id, digits, P[id]);
 }
+evalParams();                     // V must exist before any consumer reads it
 for (const [id, digits] of SPEC) {          // pass 2: listeners
   $("p-" + id).addEventListener("input", (e) => {
     P[id] = parseFloat(e.target.value);
-    $("o-" + id).textContent = readout(id, digits);
+    $("o-" + id).textContent = readout(id, digits, P[id]);
     if (id === "dpr") { dpr = P.dpr; resize(); }
     if (id === "dur") updateClock();
     markDirty(id);
+    /* Auto-key: an armed envelope owns its parameter, so a drag has to write
+       into the curve or it would appear to do nothing. */
+    if (ENV[id]?.on) setKey(id, playhead, P[id]);
     pushUniforms();
   });
 }
@@ -470,6 +580,24 @@ function markDirty(id) {
 
 for (const [id, digits] of SPEC) {
   const el = $("p-" + id);
+
+  /* Keyframe button. Non-animatable rows get a hidden placeholder so the
+     four-column grid stays aligned rather than collapsing a column. */
+  const anim = !NO_ANIM.has(id);
+  const kb = document.createElement(anim ? "button" : "span");
+  kb.className = "key" + (anim ? "" : " ghost");
+  kb.textContent = "\u25C6";
+  if (anim) {
+    kb.type = "button";
+    kb.setAttribute("aria-label", `Keyframe ${id} at playhead`);
+    kb.addEventListener("click", (ev) => {
+      focusParam(id);
+      if (ev.altKey) removeKey(id, playhead);
+      else setKey(id, playhead, V[id]);
+    });
+  }
+  el.parentElement.insertBefore(kb, $("o-" + id));
+
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "rst";
@@ -488,25 +616,258 @@ for (const id of ["revAnim", "revFlip", "camDrive"]) {
   $(id).addEventListener("change", pushUniforms);
 }
 
+/* ------------------------------------------------------------------ *
+ * Envelope UI — keyframe buttons and the curve lane
+ * ------------------------------------------------------------------ */
+let focused = null;
+let drag = null;
+
+function setKey(id, t, v) {
+  const e = envOf(id);
+  const i = e.keys.findIndex((k) => Math.abs(k.t - t) < KEY_EPS);
+  if (i >= 0) e.keys[i].v = v;
+  else e.keys.push({ t, v });
+  e.keys.sort((a, b) => a.t - b.t);
+  e.on = true;
+  refreshEnv(id);
+}
+
+function removeKey(id, t) {
+  const e = ENV[id];
+  if (!e) return;
+  const i = e.keys.findIndex((k) => Math.abs(k.t - t) < KEY_EPS);
+  if (i >= 0) e.keys.splice(i, 1);
+  if (!e.keys.length) e.on = false;
+  refreshEnv(id);
+}
+
+function refreshKeyBtn(id) {
+  const btn = $("p-" + id).parentElement.querySelector(".key");
+  if (!btn || btn.classList.contains("ghost")) return;
+  const e = ENV[id], n = e?.keys.length ?? 0;
+  btn.classList.toggle("armed", hasEnv(id));
+  btn.classList.toggle("onkey", !!e?.keys.some((k) => Math.abs(k.t - playhead) < KEY_EPS));
+  btn.title = n
+    ? `${id}: ${n} key${n === 1 ? "" : "s"} — click keys at playhead, alt-click removes`
+    : `${id}: no envelope — click to key at playhead`;
+}
+const refreshKeyBtns = () => { for (const id of ANIM) refreshKeyBtn(id); };
+
+function refreshEnv(id) {
+  refreshKeyBtn(id);
+  laneHead();
+  drawLane();
+  pushUniforms();
+  syncSliders();
+}
+
+function focusParam(id) {
+  focused = id;
+  for (const b of document.querySelectorAll(".key.focused")) b.classList.remove("focused");
+  $("p-" + id).parentElement.querySelector(".key")?.classList.add("focused");
+  $("laneHint").classList.add("hide");
+  laneHead();
+  drawLane();
+}
+
+/* An enveloped slider is a readout, not an input — push the curve's value
+   into it so the panel reflects what is actually driving the shader. */
+function syncSliders() {
+  for (const [id, digits] of SPEC) {
+    if (!hasEnv(id)) continue;
+    const el = $("p-" + id);
+    if (Math.abs(parseFloat(el.value) - V[id]) < 1e-9) continue;
+    el.value = V[id];
+    $("o-" + id).textContent = readout(id, digits, V[id]);
+    markDirty(id);
+  }
+}
+
+/* Single funnel for every playhead move: scrub, lane click, transport. */
+function setPlayhead(t) {
+  playhead = Math.min(1, Math.max(0, t));
+  $("scrub").value = playhead;
+  pushUniforms();
+  updateClock();
+  syncSliders();
+  refreshKeyBtns();
+  drawLane();
+}
+
+function laneHead() {
+  const n = $("laneName"), r = $("laneRange");
+  if (!focused) { n.textContent = "no parameter focused"; r.textContent = ""; return; }
+  const el = $("p-" + focused), e = envOf(focused);
+  n.textContent = focused;
+  r.textContent = `${el.min} … ${el.max}    ${e.keys.length} key${e.keys.length === 1 ? "" : "s"}`;
+  $("envOn").textContent = e.on ? "On" : "Off";
+  $("envOn").classList.toggle("on", e.on);
+  $("envMode").textContent = e.smooth ? "Smooth" : "Linear";
+}
+
+const laneCv = $("laneCanvas");
+const lctx = laneCv.getContext("2d");
+const LPAD = 12;
+
+function laneFit() {
+  const s = Math.min(devicePixelRatio || 1, 2);
+  laneCv.width = Math.max(1, Math.round(laneCv.clientWidth * s));
+  laneCv.height = Math.max(1, Math.round(laneCv.clientHeight * s));
+  drawLane();
+}
+
+function laneGeom() {
+  const el = focused ? $("p-" + focused) : null;
+  const lo = el ? parseFloat(el.min) : 0;
+  const hi = el ? parseFloat(el.max) : 1;
+  const w = laneCv.width, h = laneCv.height;
+  const s = w / Math.max(laneCv.clientWidth, 1);
+  const pad = LPAD * s;
+  return {
+    lo, hi, w, h, s, pad,
+    x: (t) => pad + t * (w - 2 * pad),
+    y: (v) => h - pad - ((v - lo) / Math.max(hi - lo, 1e-9)) * (h - 2 * pad),
+    tAt: (cx) => Math.min(1, Math.max(0, (cx * s - pad) / (w - 2 * pad))),
+    vAt: (cy) => {
+      const u = 1 - (cy * s - pad) / (h - 2 * pad);
+      return Math.min(hi, Math.max(lo, lo + u * (hi - lo)));
+    },
+  };
+}
+
+const CSSVAR = (n, fb) =>
+  getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+
+function drawLane() {
+  if (!laneCv.width) return;
+  const g = laneGeom();
+  lctx.clearRect(0, 0, g.w, g.h);
+
+  lctx.strokeStyle = CSSVAR("--rule", "#1e222a");
+  lctx.lineWidth = g.s;
+  for (let i = 0; i <= 4; i++) {
+    const x = g.x(i / 4);
+    lctx.beginPath(); lctx.moveTo(x, 0); lctx.lineTo(x, g.h); lctx.stroke();
+  }
+
+  const live = CSSVAR("--live", "#ff5a3c");
+  lctx.strokeStyle = live; lctx.globalAlpha = 0.5;
+  lctx.beginPath(); lctx.moveTo(g.x(playhead), 0); lctx.lineTo(g.x(playhead), g.h); lctx.stroke();
+  lctx.globalAlpha = 1;
+
+  if (!focused) return;
+  const e = envOf(focused);
+  if (!e.keys.length) return;
+
+  const tone = e.on ? CSSVAR("--signal", "#9fe0d4") : CSSVAR("--ink-dim", "#737b86");
+  lctx.strokeStyle = tone;
+  lctx.lineWidth = 1.5 * g.s;
+  lctx.beginPath();
+  const N = Math.max(2, Math.round(g.w / (2 * g.s)));
+  for (let i = 0; i <= N; i++) {
+    const t = i / N, X = g.x(t), Y = g.y(envValue(focused, t));
+    i ? lctx.lineTo(X, Y) : lctx.moveTo(X, Y);
+  }
+  lctx.stroke();
+
+  for (const k of e.keys) {
+    const X = g.x(k.t), Y = g.y(k.v), r = 4 * g.s;
+    lctx.fillStyle = Math.abs(k.t - playhead) < KEY_EPS ? live : tone;
+    lctx.beginPath();
+    lctx.moveTo(X, Y - r); lctx.lineTo(X + r, Y); lctx.lineTo(X, Y + r); lctx.lineTo(X - r, Y);
+    lctx.closePath(); lctx.fill();
+  }
+}
+
+laneCv.addEventListener("pointerdown", (ev) => {
+  if (!focused) return;
+  const r = laneCv.getBoundingClientRect();
+  const cx = ev.clientX - r.left, cy = ev.clientY - r.top;
+  const g = laneGeom(), e = envOf(focused);
+  const hit = e.keys.find((k) =>
+    Math.hypot(g.x(k.t) - cx * g.s, g.y(k.v) - cy * g.s) < 8 * g.s);
+  if (hit) {
+    if (ev.altKey) {
+      e.keys.splice(e.keys.indexOf(hit), 1);
+      if (!e.keys.length) e.on = false;
+      refreshEnv(focused);
+      return;
+    }
+    // hold the key object, not its index — the array is re-sorted while dragging
+    drag = hit;
+    laneCv.setPointerCapture(ev.pointerId);
+    return;
+  }
+  setPlayhead(g.tAt(cx));
+});
+
+laneCv.addEventListener("pointermove", (ev) => {
+  if (!drag || !focused) return;
+  const r = laneCv.getBoundingClientRect();
+  const g = laneGeom(), e = envOf(focused);
+  drag.t = g.tAt(ev.clientX - r.left);
+  drag.v = g.vAt(ev.clientY - r.top);
+  e.keys.sort((a, b) => a.t - b.t);
+  refreshEnv(focused);
+});
+
+const endDrag = () => { drag = null; };
+laneCv.addEventListener("pointerup", endDrag);
+laneCv.addEventListener("pointercancel", endDrag);
+
+laneCv.addEventListener("dblclick", (ev) => {
+  if (!focused) return;
+  const r = laneCv.getBoundingClientRect();
+  const g = laneGeom();
+  setKey(focused, g.tAt(ev.clientX - r.left), g.vAt(ev.clientY - r.top));
+});
+
+$("envOn").onclick = () => {
+  if (!focused) return;
+  const e = envOf(focused);
+  e.on = !e.on && e.keys.length > 0;   // cannot arm an empty envelope
+  refreshEnv(focused);
+};
+$("envMode").onclick = () => {
+  if (!focused) return;
+  const e = envOf(focused);
+  e.smooth = !e.smooth;
+  refreshEnv(focused);
+};
+$("envClear").onclick = () => {
+  if (!focused) return;
+  const e = envOf(focused);
+  e.keys.length = 0;
+  e.on = false;
+  refreshEnv(focused);
+  syncSliders();
+};
+
+refreshKeyBtns();
+laneHead();
+addEventListener("resize", laneFit);
+laneFit();
+
 /* Sliders are normalised against scene extent so they behave the same on
    any capture. Never feed a raw slider value into a world-space uniform. */
 function pushUniforms() {
+  evalParams();
   const span = (bounds.max - bounds.min) || 1;
-  const sweep = $("revAnim").checked ? playhead : P.revY;
+  const sweep = $("revAnim").checked ? playhead : V.revY;
 
-  U.time.value    = playhead * P.dur;
-  U.cullA.value   = P.cullA;
-  U.cullS.value   = cullSize() * radius;
-  U.sizeMul.value = P.scale;
+  U.time.value    = playhead * V.dur;
+  U.cullA.value   = V.cullA;
+  U.cullS.value   = cullSize(V.cullS) * radius;
+  U.sizeMul.value = V.scale;
   U.revY.value    = bounds.min + sweep * span * 1.02;
-  U.revS.value    = Math.max(P.revS * span, 1e-5);
-  U.revK.value    = P.revK;
+  U.revS.value    = Math.max(V.revS * span, 1e-5);
+  U.revK.value    = V.revK;
   U.revFlip.value = $("revFlip").checked ? 1 : 0;
-  U.dAmt.value    = P.dAmt * radius;
-  U.dFrq.value    = P.dFrq / Math.max(radius, 1e-6);
-  U.dSpd.value    = P.dSpd;
-  U.dRnd.value    = P.dRnd;
-  U.tint.value.set(P.tR, P.tG, P.tB);
+  U.dAmt.value    = V.dAmt * radius;
+  U.dFrq.value    = V.dFrq / Math.max(radius, 1e-6);
+  U.dSpd.value    = V.dSpd;
+  U.dRnd.value    = V.dRnd;
+  U.tint.value.set(V.tR, V.tG, V.tB);
 
   /* Spark gates the generate pass on `viewChanged || version changed`
      (spark.module.js 2.1.0, ~line 10210). Writing a dyno uniform's .value
@@ -635,7 +996,7 @@ $("goB").onclick = () => apply(key.B, 1);
 const ease = (x, k) => (k <= 0 ? x : x * x * (3 - 2 * x) * k + x * (1 - k));
 function driveCamera() {
   if (!$("camDrive").checked || !key.A || !key.B) return;
-  const u = ease(playhead, P.ease);
+  const u = ease(playhead, V.ease);
   camera.position.lerpVectors(key.A.pos, key.B.pos, u);
   controls.target.lerpVectors(key.A.tgt, key.B.tgt, u);
   camera.lookAt(controls.target);
@@ -651,11 +1012,7 @@ $("play").onclick = () => {
   $("play").textContent = playing ? "Pause" : "Play";
   $("play").classList.toggle("on", playing);
 };
-$("scrub").addEventListener("input", (e) => {
-  playhead = parseFloat(e.target.value);
-  pushUniforms();
-  updateClock();
-});
+$("scrub").addEventListener("input", (e) => setPlayhead(parseFloat(e.target.value)));
 
 function frame(now) {
   requestAnimationFrame(frame);
@@ -667,6 +1024,8 @@ function frame(now) {
     $("scrub").value = playhead;
     pushUniforms();
     updateClock();
+    syncSliders();
+    drawLane();
   }
   fpsAvg = fpsAvg * 0.9 + (1 / Math.max(dt, 1e-4)) * 0.1;
   $("t-fps").textContent = fpsAvg.toFixed(0);
@@ -680,12 +1039,31 @@ function frame(now) {
  * ------------------------------------------------------------------ */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/* Encoder backpressure without a timer.
+   Chrome clamps setTimeout to ~1s in a hidden tab (measured: sleep(2) took
+   313ms, sleep(24) took 1000ms), so a `while (queue > n) await sleep(2)` loop
+   turns a 30-frame export into minutes. The `dequeue` event is not clamped.
+   The race against a short sleep guards the case where the queue drains
+   between the size check and the listener being attached. */
+async function drain(encoder, below) {
+  while (encoder.encodeQueueSize > below) {
+    await Promise.race([
+      new Promise((r) => encoder.addEventListener("dequeue", r, { once: true })),
+      sleep(50),
+    ]);
+  }
+}
+
 $("render").onclick = async () => {
   if (!mesh) { setStatus("Load a splat first.", true); return; }
   if (rendering) return;
   if (typeof VideoEncoder === "undefined") {
     setStatus("No WebCodecs VideoEncoder in this browser. Use Chrome or Edge.", true);
     return;
+  }
+
+  if (document.hidden) {
+    setStatus("Tab is hidden — Chrome throttles timers there and the render will crawl. Keep this tab visible.", true);
   }
 
   const [w, h] = $("res").value.split("x").map(Number);
@@ -742,9 +1120,9 @@ $("render").onclick = async () => {
       encoder.encode(vf, { keyFrame: i % (fps * 2) === 0 });
       vf.close();
 
-      while (encoder.encodeQueueSize > 8) await sleep(2);
+      await drain(encoder, 8);
       if (i % 4 === 0) {
-        setStatus(`Rendering ${i + 1} / ${total} frames…`);
+        setStatus(`Rendering ${i + 1} / ${total} frames…${document.hidden ? "  [tab hidden — throttled]" : ""}`);
         $("t-state").textContent = `${Math.round(((i + 1) / total) * 100)}%`;
       }
     }

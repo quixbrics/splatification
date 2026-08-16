@@ -117,10 +117,15 @@ a sort/async glitch rather than a missing invalidation.
 every `k`. Expected from the formula, not a bug — but it means the midpoint is a
 bad place to check whether the ease slider works. Probe at 0.25.
 
-**`br` and `settle` have never been exercised at runtime.** Both are correctly
-wired (`P.br * 1000000` into `encoder.configure`, `P.settle` into the offline
-loop) but only take effect during an actual export, which has not been run
-end-to-end since the `updateVersion()` fix. First real export is the test.
+**The `settle` wait is still wall-clock and still clamped in a hidden tab.**
+Chrome throttles `setTimeout` to ~1s when the tab is not visible (measured:
+`sleep(2)` → 313ms, `sleep(24)` → 1000ms). Encoder backpressure no longer uses
+a timer, but the settle itself does, so a background export runs at roughly
+1 frame/sec regardless of the slider. The render loop stops entirely when
+hidden — `requestAnimationFrame` does not fire — so the live view freezes too.
+The status line now appends `[tab hidden — throttled]` and a warning fires at
+render start. A real fix means hooking Spark's sort-complete signal instead of
+sleeping, which is the same fix the Export section has wanted all along.
 
 ---
 
@@ -196,6 +201,12 @@ single-click restore.
 
 ---
 
+**Export backpressure was timer-based.** `while (encoder.encodeQueueSize > 8)
+await sleep(2)` cost ~313ms per iteration in a hidden tab instead of 2ms.
+Replaced with `drain()`, which awaits the encoder's `dequeue` event — not
+clamped — raced against a 50ms sleep to cover the case where the queue empties
+between the size check and the listener attaching.
+
 **Dev-loop gotcha:** `python3 -m http.server` sends only `Last-Modified`, and
 Chrome heuristically caches the page. After the TDZ fix the browser kept running
 v1 and the stack traces referenced a `bind()` that no longer existed in the file
@@ -205,6 +216,78 @@ or serve with `Cache-Control: no-store`:
 ```
 python3 -c "import http.server; H=http.server.SimpleHTTPRequestHandler; _e=H.end_headers; H.end_headers=lambda s:(s.send_header('Cache-Control','no-store'),_e(s)); http.server.test(HandlerClass=H,port=8000)"
 ```
+
+---
+
+## Envelopes — per-parameter automation
+
+Roadmap item 3, the one flagged as the biggest functional gap. Before this,
+one global `playhead` drove everything and the camera had exactly two
+keyframes, so "animation" meant a single linear sweep of whatever happened to
+be wired to the timeline.
+
+### Model
+
+```
+ENV[id] = { on: bool, smooth: bool, keys: [{t, v}, …] }   // keys sorted by t
+```
+
+Two value stores, and the split matters:
+
+- **`P[id]`** — the manual slider value. An envelope never overwrites it, so
+  disarming restores exactly what was last dialled in.
+- **`V[id]`** — the effective value at the current playhead. Everything
+  downstream reads `V`: uniforms, camera ease, readouts, export.
+
+`evalParams()` fills `V` and is called at the top of `pushUniforms()`, so there
+is exactly one place where envelopes are resolved. Any new consumer must read
+`V`, never `P`.
+
+`t` is normalised 0..1 across the clip, not seconds — so changing `Duration`
+rescales the whole animation rather than truncating it.
+
+### Not animatable
+
+`dur`, `br`, `settle`, `dpr` are excluded via `NO_ANIM`. Animating clip length
+or bitrate is meaningless; animating sort-settle or pixel ratio would make an
+export non-reproducible. Their rows get a hidden placeholder `.key.ghost` so
+the four-column grid stays aligned instead of collapsing a column.
+
+### Interaction
+
+- **`◆` per row** — key at playhead, alt-click removes, click focuses the lane.
+- **Lane** — drag keys in both axes, double-click empty space to add, alt-click
+  a key to delete, click empty space to scrub.
+- **Auto-key**: dragging a slider whose envelope is armed writes a key at the
+  playhead. Without this the drag would appear to do nothing, since an armed
+  envelope owns its parameter.
+- An armed slider becomes a **readout** — `syncSliders()` pushes the curve's
+  value into it so the panel shows what is actually driving the shader.
+
+Arming an empty envelope is refused; there is nothing to interpolate.
+
+### Export
+
+The offline loop needed no changes. It sets `playhead` then calls
+`pushUniforms()`, which resolves envelopes — so exports honour curves for free.
+
+### Watch out
+
+`drawLane()` holds the dragged **key object**, not its index: the array is
+re-sorted on every pointermove, so an index would point at the wrong key the
+moment a drag crosses a neighbour.
+
+Adding `laneFit()` to `resize()` reintroduces the v1 death: `resize()` runs
+during module evaluation, long before the lane's `const`s exist, so it throws a
+TDZ error and silently kills everything below it. The lane sizes from CSS and
+carries its own resize listener. There is a comment in `resize()` saying so —
+leave it there.
+
+### Next on this
+
+Envelopes are in-memory only. Save/load of the whole parameter + envelope set
+as JSON is the obvious next step and is what makes the feature usable across
+sessions.
 
 ---
 
@@ -269,6 +352,26 @@ Before this fix the offline loop was also silently rendering unchanged splat
 data every frame — any exported animation of an effect parameter would have come
 out frozen except where the camera moved.
 
+### Verified end-to-end, 2026-08-16
+
+First real export since the `updateVersion()` fix. 30 frames, 1280×720, 30fps,
+`dur=1`, reveal sweeping via `revAnim`, camera dollying A→B.
+
+- Container exactly as configured: h264 High, 1280×720, 30/1, `nb_frames=30`,
+  `duration=1.000000`, yuv420p.
+- **Effects animate.** Mean luma per frame rises monotonically 24.0 → 38.6
+  across all 30 frames, in an S-curve matching the camera ease. Pre-fix this
+  would have been flat except where the camera moved.
+- Requested 20 Mbps, got 5.1 Mbps actual. Not a defect — the encoder treats
+  bitrate as a ceiling and this content is easy. Do not "fix" this.
+
+Check animation with, rather than by eye:
+
+```
+ffprobe -v error -f lavfi -i "movie=out.mp4,signalstats" \
+  -show_entries frame_tags=lavfi.signalstats.YAVG -of csv=p=0
+```
+
 `preserveDrawingBuffer: true` is set on the WebGLRenderer for reliable
 `VideoFrame(canvas)` capture. It costs some performance; do not remove it
 without re-testing export.
@@ -282,11 +385,12 @@ without re-testing export.
 2. ~~Confirm the effect stack — displace, reveal, trim, tint each in isolation
    on a real capture.~~ **Done**, measured rather than eyeballed: every slider
    and checkbox verified against pixel coverage/luminance/bbox on the butterfly.
-   This is what surfaced the missing `updateVersion()`. Still unexercised at
-   runtime: `br` and `settle`, which only take effect during an actual export.
-3. **Per-parameter envelopes.** Currently one global `t` drives everything and
-   the camera has exactly two keyframes. A real animator needs per-parameter
-   automation curves. This is the biggest functional gap.
+   This is what surfaced the missing `updateVersion()`. `br` and `settle` are
+   now exercised too — see the verified export run below.
+3. ~~**Per-parameter envelopes.**~~ **Done** — see the Envelopes section above.
+   Keyframe lists per parameter, a curve lane with draggable keys, auto-key on
+   armed sliders, honoured by the export path. Persistence (save/load as JSON)
+   is the remaining piece.
 4. **SDF-shaped edits** via Spark's `SplatEdit` / `SplatEditSdf` /
    `SplatEditSdfType` — box and sphere region colorize/clip. This is the
    Irrealix "crop with spherical or box shape" primitive and Spark supports it

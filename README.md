@@ -39,7 +39,18 @@ All effects are a single `dyno.dynoBlock` running in one GPU pass as an
 - **Tint** — RGB multiply
 
 Every parameter has a `↺` reset button, which brightens when the value differs
-from its default.
+from its default, and a `◆` keyframe button.
+
+## Animation
+
+Each parameter carries its own envelope — a keyframe list over the normalised
+0..1 timeline, with smooth or linear interpolation. Click `◆` on a row to key it
+at the playhead and focus it in the curve lane; drag keys in the lane, or drag
+the slider itself to auto-key. Armed sliders become live readouts of their
+curve. Exports honour envelopes.
+
+Keep the tab visible while exporting — Chrome throttles background timers to
+~1s, which slows the render to roughly a frame per second.
 
 ## Notes
 
