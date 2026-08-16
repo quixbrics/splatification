@@ -170,6 +170,44 @@
   #status.warn{color:var(--live)}
   a{color:var(--signal)}
   @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+
+  /* Mobile ------------------------------------------------------------
+     Desktop is the target and none of the rules above are conditional on
+     screen size, so this block can only ever subtract. The rail becomes a
+     bottom sheet instead of a permanent 340px column, which is the whole
+     width of a phone. Everything stays reachable — nothing is removed. */
+  #panelToggle{
+    display:none;
+    position:fixed; right:12px; top:12px; z-index:20;
+  }
+  @media (max-width: 900px), (pointer: coarse) {
+    :root{ --rail:0px; --dock:56px; --lane:96px; }
+    #panelToggle{ display:block }
+    #rail{
+      top:auto; left:0; right:0; width:100%;
+      height:min(64vh, 560px);
+      bottom:calc(var(--dock) + var(--lane));
+      border-left:0; border-top:1px solid var(--rule);
+      transform:translateY(calc(100% + var(--dock) + var(--lane)));
+      transition:transform .22s ease;
+      z-index:15;
+    }
+    body.panel-open #rail{ transform:translateY(0) }
+    /* The lane header carries a lot of controls; let it scroll rather than
+       overflow or reflow the whole strip. */
+    #laneHead{ overflow-x:auto; scrollbar-width:none }
+    #laneHead::-webkit-scrollbar{ display:none }
+    #osd{ font-size:9px; left:10px; top:10px }
+    #osd b{ width:62px }
+    #transport{ gap:9px; padding:0 10px }
+    #clock{ min-width:96px; font-size:10px }
+    /* Touch targets: a 13px glyph is not tappable. */
+    .rst, .key{ width:22px; height:22px; line-height:22px; font-size:12px }
+    .row{ grid-template-columns:1fr auto auto 54px; margin-bottom:11px }
+    .row input[type=range]{ height:22px }
+    button, select{ padding:5px 9px }
+  }
+
 </style>
 
 <script type="importmap">
@@ -191,7 +229,11 @@
     <div><b>fps</b><span id="t-fps">—</span></div>
     <div><b>t</b><span id="t-time">—</span></div>
     <div><b>state</b><span id="t-state">—</span></div>
+    <div><b>dpr</b><span id="t-dpr">—</span></div>
   </div>
+
+  <!-- Mobile only: the rail is a bottom sheet there, this opens it. -->
+  <button id="panelToggle" aria-expanded="false">Controls</button>
   <div id="drop">
     <h1>Splat Bench</h1>
     <p>Drop a <strong>.ply</strong> / .spz / .splat / .sog file here, or load the test asset to check the pipeline.</p>
@@ -402,6 +444,7 @@
     <div class="row"><label>Pixel ratio</label><output id="o-dpr">—</output>
       <input type="range" id="p-dpr" min="0.5" max="2" step="0.05" value="1"></div>
     <label class="check"><input type="checkbox" id="useLod"> Level of detail on next load (large scans)</label>
+    <label class="check"><input type="checkbox" id="mobileMode"> Mobile profile (caps pixel ratio, forces LOD)</label>
     <div class="btns"><button id="reframe">Reframe</button><button id="reload">Load another</button></div>
   </section>
 </aside>
@@ -453,9 +496,19 @@ const P = {};                         // parameter values, keyed by slider id
  * three + spark
  * ------------------------------------------------------------------ */
 const stage = $("stage");
+/* preserveDrawingBuffer is required for reliable VideoFrame(canvas) capture
+   and costs real performance — it defeats the driver's ability to discard the
+   buffer after compositing. Export needs WebCodecs, which iOS Safari and
+   Firefox do not have, so on those the flag is pure cost for a feature that
+   cannot run. Gate it on the same check the export path uses. `?debug=1`
+   keeps it on so pixel probes stay reliable there.
+
+   NOTES.md previously said never to remove this without re-testing export.
+   That still holds: it is ON wherever export is possible. */
+const CAN_EXPORT = typeof VideoEncoder !== "undefined";
 const renderer = new THREE.WebGLRenderer({
   antialias: false,
-  preserveDrawingBuffer: true,        // required for reliable VideoFrame(canvas)
+  preserveDrawingBuffer: CAN_EXPORT || new URLSearchParams(location.search).has("debug"),
 });
 renderer.setClearColor(0x08090b, 1);
 stage.appendChild(renderer.domElement);
@@ -471,14 +524,37 @@ const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 
+/* ------------------------------------------------------------------ *
+ * Mobile profile
+ *
+ * Desktop remains the target: this only ever caps, never changes what a
+ * control means. The pixel-ratio slider still reports what the user chose;
+ * the OSD reports what is actually being rendered, and says when the two
+ * differ. A panel that quietly disagrees with the renderer is the failure
+ * mode this file keeps rediscovering.
+ * ------------------------------------------------------------------ */
+const MOBILE_DPR_CAP = 1;
+const MOBILE_LOD_ABOVE = 150000;      // desktop uses 500k
+const isMobileDefault =
+  matchMedia("(pointer: coarse)").matches || matchMedia("(max-width: 900px)").matches;
+
+const mobileOn = () => $("mobileMode").checked;
+const effDpr = () => (mobileOn() ? Math.min(dpr, MOBILE_DPR_CAP) : dpr);
+
+function showDpr() {
+  const e = effDpr();
+  $("t-dpr").textContent = e === dpr ? e.toFixed(2) : `${e.toFixed(2)} (capped)`;
+}
+
 function resize() {
   const w = stage.clientWidth, h = stage.clientHeight;
-  renderer.setPixelRatio(dpr);
+  renderer.setPixelRatio(effDpr());
   renderer.setSize(w, h, false);
   renderer.domElement.style.width = w + "px";
   renderer.domElement.style.height = h + "px";
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
+  showDpr();
   /* Deliberately NOT calling laneFit() here. resize() runs during module
      evaluation, well before the lane's consts exist — calling it would throw
      a TDZ error and kill everything below, which is exactly how v1 died. The
@@ -836,6 +912,31 @@ for (const id of ["revAnim", "revFlip", "camDrive"]) {
 for (const id of ["rgMode", "rgShape"]) {
   $(id).addEventListener("change", pushUniforms);
 }
+
+/* ------------------------------------------------------------------ *
+ * Mobile wiring
+ * ------------------------------------------------------------------ */
+$("mobileMode").checked = isMobileDefault;
+$("mobileMode").addEventListener("change", () => {
+  resize();
+  setStatus(
+    mobileOn()
+      ? `Mobile profile on — pixel ratio capped at ${MOBILE_DPR_CAP}, LOD forced on next load.`
+      : "Mobile profile off — full pixel ratio, LOD follows its checkbox.",
+  );
+});
+
+$("panelToggle").onclick = () => {
+  const open = document.body.classList.toggle("panel-open");
+  $("panelToggle").setAttribute("aria-expanded", String(open));
+  $("panelToggle").textContent = open ? "Close" : "Controls";
+};
+
+/* Tapping the viewport dismisses the sheet, so the splat can be inspected
+   without hunting for the button. Only when it is actually open. */
+stage.addEventListener("pointerdown", () => {
+  if (document.body.classList.contains("panel-open")) $("panelToggle").click();
+});
 
 /* ------------------------------------------------------------------ *
  * Envelope UI — keyframe buttons and the curve lane
@@ -1234,7 +1335,24 @@ async function loadSplat(source, label) {
       }
     },
   };
-  if ($("useLod").checked) { opts.lod = true; opts.lodAbove = 500000; }
+  /* The mobile profile forces LOD on regardless of the checkbox — a phone
+     cannot carry a full-rate scan, and silently failing to load is worse
+     than silently reducing detail. */
+  /* `nonLod` is required, not optional. Spark's loader returns ONLY
+     `{ lodSplats }` when it builds a LOD tree, leaving packedSplats empty —
+     the mesh then reports 0 splats and renders nothing. `nonLod: true` makes
+     it return the full set as well. Measured: without it, 0 gaussians and 0%
+     coverage; with it, 177,132 gaussians and a correct render.
+
+     Note also that `lodAbove` is a floor, not a ceiling: LOD is built only
+     when the file has MORE than this many splats. The original 500000 sat
+     above the test asset's 177k, so this path had never actually run and the
+     bug above was latent. */
+  if ($("useLod").checked || mobileOn()) {
+    opts.lod = true;
+    opts.lodAbove = mobileOn() ? MOBILE_LOD_ABOVE : 500000;
+    opts.nonLod = true;
+  }
   if (typeof source === "string") opts.url = source;
   else { opts.fileBytes = source.bytes; opts.fileName = source.name; }
 
@@ -1274,7 +1392,17 @@ function reframe() {
   bounds.max = box.max.y;
 
   controls.target.copy(sphere.center);
-  camera.position.copy(sphere.center).add(new THREE.Vector3(0, 0, radius * 2.6));
+
+  /* Frame against whichever field of view is TIGHTER. camera.fov is the
+     vertical one, so the old fixed `radius * 2.6` only ever framed correctly
+     on a landscape window — on a portrait phone the horizontal FOV is much
+     narrower and a wide subject overflowed the frame entirely (measured: the
+     butterfly covered 100% of a 390x692 viewport). On a wide window
+     hFov > vFov, so this reduces to the previous constant. */
+  const vFov = (camera.fov * Math.PI) / 180;
+  const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
+  const dist = (radius / Math.sin(Math.min(vFov, hFov) / 2)) * 1.1;
+  camera.position.copy(sphere.center).add(new THREE.Vector3(0, 0, dist));
   camera.near = radius / 200;
   camera.far = radius * 60;
   camera.updateProjectionMatrix();
@@ -1508,6 +1636,9 @@ $("render").onclick = async () => {
  * ------------------------------------------------------------------ */
 const PRESET_FORMAT = "splat-bench-preset";
 const PRESET_VERSION = 3;   // v2 added `selects`; v3 added `audio` routing
+/* `mobileMode` is deliberately absent: it is a property of the device you are
+   sitting at, not of the look. A preset saved on a desktop must not force a
+   phone back to full pixel ratio, nor the reverse. */
 const TOGGLES = ["revAnim", "revFlip", "camDrive", "useLod"];
 const SELECTS = ["rgMode", "rgShape", "res", "fps"];
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -1738,6 +1869,14 @@ $("presetFile").onchange = (e) => {
   e.target.value = "";                            // allow reloading the same file
 };
 
+/* Surface the export limitation at boot rather than on click: on iOS Safari
+   there is no WebCodecs at all, and a Render button that only explains itself
+   after you press it is a worse answer than one that is visibly disabled. */
+if (!CAN_EXPORT) {
+  $("render").disabled = true;
+  $("render").title = "Video export needs WebCodecs — Chrome or Edge only.";
+}
+
 /* ------------------------------------------------------------------ *
  * Measurement hook — opt-in via ?debug=1
  *
@@ -1775,6 +1914,7 @@ if (new URLSearchParams(location.search).has("debug")) {
  * ------------------------------------------------------------------ */
 pushUniforms();
 updateClock();
+showDpr();
 $("t-state").textContent = "idle";
 setStatus("No splat loaded — drop a file on the viewport.");
 requestAnimationFrame(frame);

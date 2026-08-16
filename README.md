@@ -74,6 +74,14 @@ write that does not bump the version is silently invisible.
 Splat captures are gitignored; the app loads a remote test asset so the repo is
 runnable as cloned.
 
+## Mobile
+
+The rail becomes a bottom sheet on narrow or touch screens, with larger touch
+targets. A **Mobile profile** toggle (on by default there) caps the pixel ratio
+and forces level-of-detail on load; it caps rather than redefines, and the OSD
+reports the pixel ratio actually being rendered. Video export needs WebCodecs,
+so the Render button is disabled on browsers without it (including iOS Safari).
+
 ## Debugging
 
 Load with `?debug=1` to expose `window.__bench` — a synchronous `draw()`, an

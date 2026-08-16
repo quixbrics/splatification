@@ -447,6 +447,89 @@ been bitten before by a panel that lies about the state; do not reintroduce it.
 
 ---
 
+## Mobile
+
+Roadmap item 7. Desktop stays the target: every mobile rule lives in one
+`@media (max-width: 900px), (pointer: coarse)` block at the **end** of the
+stylesheet, so it can only ever subtract. Nothing above it is conditional on
+screen size.
+
+(It has to be at the end. Placed earlier it lost to equal-specificity base
+rules and the touch-target sizes silently did nothing — measured 13px when
+22px was intended.)
+
+### Layout
+
+The rail becomes a bottom sheet rather than a permanent 340px column, which is
+most of a phone's width. `Controls` toggles it; tapping the viewport dismisses
+it. Verified at 390×844: stage 390×692, lane 96, transport 56 — exactly 844,
+full-width stage, no horizontal overflow, drawer opening to top 152.
+
+Touch targets go from 13px to 22px. Nothing is removed on mobile — the lane
+header scrolls horizontally rather than dropping controls.
+
+### Framing was wrong on any narrow window
+
+`reframe()` used a fixed `radius * 2.6`, derived from the **vertical** FOV.
+`camera.fov` is vertical, so on a portrait viewport the horizontal FOV is far
+narrower (29.4° at 390×844 vs 50° vertical) and a wide subject overflowed the
+frame completely. Now it frames against whichever FOV is tighter:
+
+```js
+const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
+const dist = radius / Math.sin(Math.min(vFov, hFov) / 2) * 1.1;
+```
+
+On a wide window `hFov > vFov` so this reduces to the old constant — desktop
+framing is unchanged. This was a general bug, not a mobile one; it just could
+not show up on a landscape window.
+
+### Profile
+
+`Mobile profile` defaults on for coarse pointers or narrow viewports and is a
+plain toggle, so desktop can test it. It **caps**, never redefines: the
+pixel-ratio slider still reports what you chose, and the OSD reports what is
+actually rendered, saying `(capped)` when they differ. Verified: slider at 2
+with the profile on gives a 1:1 backing store and an OSD reading of
+`1.00 (capped)`; off, 2.00 and a 2× buffer.
+
+It is deliberately **not** in presets — it describes the device you are at, not
+the look. A preset saved on a desktop must not force a phone to full pixel
+ratio.
+
+### `nonLod` is required, and `lodAbove` is a floor
+
+Spark's loader returns **only** `{ lodSplats }` when it builds a LOD tree,
+leaving `packedSplats` empty — the mesh reports 0 splats and renders nothing.
+`nonLod: true` makes it also return the full set. Measured without it: 0
+gaussians, 0% coverage. With it: 177,132 gaussians and a correct render.
+
+`lodAbove` is a floor, not a ceiling — LOD is built only when the file has MORE
+than that many splats. The pre-existing `useLod` checkbox used 500000, above
+the 177k test asset, so **that path had never actually executed** and the bug
+was latent until the mobile profile lowered the threshold to 150000.
+
+### `preserveDrawingBuffer` is now conditional
+
+It is required for `VideoFrame(canvas)` and costs real performance. Export
+needs WebCodecs, which iOS Safari and Firefox lack, so there it was pure cost
+for a feature that cannot run. It is now gated on the same `VideoEncoder`
+check the export path uses, plus `?debug=1` so pixel probes stay reliable.
+NOTES' old warning still holds: it is ON wherever export is possible. The
+Render button is also disabled up front when WebCodecs is absent, rather than
+explaining itself only after a press.
+
+### Testing note: hidden tabs freeze CSS transitions too
+
+The drawer appeared broken under automation — `panel-open` was set, the rule
+parsed and matched, and the transform never changed, even from an inline
+style. A hidden tab does not advance CSS transitions, so the computed value
+stays frozen at its start. Setting `transition: none` before measuring gives
+the true value (top 152, exactly as designed). Same family as the rAF stall
+behind `?debug=1`.
+
+---
+
 ## Presets — save/load as JSON
 
 Envelopes alone do not round-trip a scene. A disarmed parameter reads from `P`,
@@ -620,7 +703,10 @@ without re-testing export.
    see the Audio-reactive drive section above. Offline three-band analysis,
    signed depth per parameter, layered on top of envelopes, persisted as
    routing in presets.
-7. Mobile: `lod: true` plus reduced pixel ratio, gated behind a toggle.
+7. ~~Mobile: `lod: true` plus reduced pixel ratio, gated behind a toggle.~~
+   **Done** — see the Mobile section above. Bottom-sheet rail, touch targets,
+   pixel-ratio cap, forced LOD, and an aspect-aware `reframe()` that fixed a
+   framing bug affecting any narrow window.
 8. Multiple `SplatMesh` instances in one scene with independent transforms.
    **Deferred to last on 2026-08-16** — not needed at this stage. Nothing is
    blocked on it, and the Region work already anticipates it: edits are scoped
