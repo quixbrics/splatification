@@ -1,5 +1,7 @@
 # Splatification — Splat Bench
 
+**[Live demo →](https://quixbrics.github.io/splatification/)** (Chrome or Edge for video export)
+
 A bespoke 3D Gaussian Splatting manipulator and animator for the browser.
 Arbitrary per-Gaussian programmable manipulation via Spark's `dyno` shader-graph
 system, with an eye toward parameter automation driven from outside (audio FFT,
@@ -17,7 +19,7 @@ ES modules will not load over `file://` — it must be served.
 python3 -m http.server
 ```
 
-Then open <http://localhost:8000/splat-bench.html> and click **Load test asset**.
+Then open <http://localhost:8000/> and click **Load test asset**.
 
 Chrome or Edge is required for video export (WebCodecs `VideoEncoder`).
 

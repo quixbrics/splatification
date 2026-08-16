@@ -1,9 +1,14 @@
 # Splatification — project notes
 
 Working folder: `/Users/55147209/Documents/Claude_Builds/Splatification`
-Main file: `splat-bench.html` (single file, no build step, no npm install)
-Serve with `python3 -m http.server` and open `http://localhost:8000/splat-bench.html`.
+Main file: `index.html` (single file, no build step, no npm install)
+Serve with `python3 -m http.server` and open `http://localhost:8000/`.
 ES modules will **not** load over `file://` — it must be served.
+
+It is `index.html` rather than a descriptive name so GitHub Pages serves it at
+the repo root with no path. `splat-bench.html` remains as a redirect stub for
+older links and carries the query string across, so `?debug=1` survives.
+Live at <https://quixbrics.github.io/splatification/>.
 
 ---
 
@@ -712,6 +717,30 @@ without re-testing export.
    blocked on it, and the Region work already anticipates it: edits are scoped
    per mesh via `mesh.add(edit)`, so regions will not leak between meshes when
    this does land.
+
+## Deployment — GitHub Pages
+
+Served from `main` at the repo root. Three things make this work, and each was
+checked rather than assumed:
+
+- **`index.html`.** Pages serves no directory index otherwise; the root URL
+  would 404.
+- **`.nojekyll`.** Pages runs Jekyll by default, which silently drops paths
+  beginning with `_`. Nothing currently starts with an underscore, but the
+  failure mode is a missing file with no error, so the guard stays.
+- **No cross-origin isolation needed.** Spark 2.1.0 does not use
+  `SharedArrayBuffer` (checked: zero occurrences), which matters because Pages
+  cannot set COOP/COEP headers. If a future Spark release adopts it, Pages
+  stops being a viable host and that is the reason why.
+
+Both remote dependencies serve `access-control-allow-origin: *` — the pinned
+`spark.module.js` and the `butterfly.spz` test asset — so the CDN importmap and
+Load test asset both work from the Pages origin, not just localhost.
+
+Pages is HTTPS, so the secure-context requirements (WebCodecs, `AudioContext`)
+are satisfied. Export still needs Chrome or Edge.
+
+There is no build step and nothing to configure: a push to `main` republishes.
 
 ## Non-goals
 
