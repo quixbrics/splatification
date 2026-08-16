@@ -303,7 +303,8 @@
   </div>
   <div id="drop">
     <h1>Splat Bench</h1>
-    <p>Drop a <strong>.ply</strong> / .spz / .splat / .sog file here, or load the test asset to check the pipeline.</p>
+    <p>Drop a <strong>.ply</strong> / .spz / .splat / .sog file here — or tap <em>Choose file</em> —
+       or load the test asset to check the pipeline.</p>
     <div class="btns" style="justify-content:center">
       <button id="pick">Choose file</button>
       <button id="demo">Load test asset</button>
@@ -1486,21 +1487,50 @@ function reframe() {
 $("pick").onclick = $("reload").onclick = () => $("file").click();
 $("reframe").onclick = reframe;
 $("demo").onclick = () => loadSplat("https://sparkjs.dev/assets/splats/butterfly.spz", "butterfly.spz");
-$("file").onchange = async (e) => {
-  const f = e.target.files?.[0]; if (!f) return;
-  loadSplat({ bytes: new Uint8Array(await f.arrayBuffer()), name: f.name }, f.name);
-};
+/* ------------------------------------------------------------------ *
+ * File routing
+ *
+ * iOS matches a file input's `accept` extensions against REGISTERED SYSTEM
+ * UTIs, not against the filename. Splat formats have no registered UTI, so
+ * `accept=".ply,.spz,…"` greys out every file in the Files picker and
+ * nothing at all can be selected — the same failure the audio input had for
+ * a different reason. Dropping the attribute on touch devices is the only
+ * reliable fix.
+ *
+ * That makes every picker unfiltered there, so all three buttons and the
+ * drop target now route through one function that dispatches on extension.
+ * Tapping "Choose file" and picking a .json loads it as a preset rather than
+ * failing, which is the right behaviour when the OS will not filter for us.
+ * Desktop keeps its `accept` filters, where they work correctly.
+ * ------------------------------------------------------------------ */
+const SPLAT_RE = /\.(ply|spz|splat|ksplat|sog|zip|rad)$/i;
+const AUDIO_RE = /\.(mp3|wav|ogg|oga|opus|m4a|aac|flac|aif|aiff|caf|webm)$/i;
+
+async function handleFile(f) {
+  if (!f) return;
+  if (/\.json$/i.test(f.name)) return readPreset(f);
+  if (AUDIO_RE.test(f.name) || /^audio\//i.test(f.type)) return loadAudio(f);
+  if (SPLAT_RE.test(f.name)) {
+    return loadSplat({ bytes: new Uint8Array(await f.arrayBuffer()), name: f.name }, f.name);
+  }
+  setStatus(
+    `Can't open ${f.name} — expected a splat (.ply .spz .splat .ksplat .sog), ` +
+    `audio, or a .json preset.`, true);
+}
+
+/* Touch pickers cannot be trusted to filter; let the router sort it out. */
+if (matchMedia("(pointer: coarse)").matches) {
+  for (const id of ["file", "audioFile", "presetFile"]) $(id).removeAttribute("accept");
+}
+
+const pick = (e) => { handleFile(e.target.files?.[0]); e.target.value = ""; };
+$("file").onchange = pick;
 addEventListener("dragover", (e) => { e.preventDefault(); document.body.classList.add("dragging"); });
 addEventListener("dragleave", () => document.body.classList.remove("dragging"));
 addEventListener("drop", async (e) => {
   e.preventDefault();
   document.body.classList.remove("dragging");
-  const f = e.dataTransfer.files?.[0]; if (!f) return;
-  if (/\.json$/i.test(f.name)) { readPreset(f); return; }
-  if (/^audio\//i.test(f.type) || /\.(mp3|wav|ogg|oga|opus|m4a|aac|flac|aif|aiff|caf|webm)$/i.test(f.name)) {
-    loadAudio(f); return;
-  }
-  loadSplat({ bytes: new Uint8Array(await f.arrayBuffer()), name: f.name }, f.name);
+  handleFile(e.dataTransfer.files?.[0]);
 });
 
 /* ------------------------------------------------------------------ *
@@ -2003,11 +2033,7 @@ async function loadAudio(file) {
   }
 }
 
-$("audioFile").onchange = (e) => {
-  const f = e.target.files?.[0];
-  if (f) loadAudio(f);
-  e.target.value = "";
-};
+$("audioFile").onchange = pick;
 
 /* Audio follows the transport. Playback is NOT what drives the parameters —
    that is always the offline envelope — so an export still matches what you
@@ -2083,11 +2109,7 @@ async function readPreset(file) {
   }
 }
 
-$("presetFile").onchange = (e) => {
-  const f = e.target.files?.[0];
-  if (f) readPreset(f);
-  e.target.value = "";                            // allow reloading the same file
-};
+$("presetFile").onchange = pick;
 
 /* Surface the export limitation at boot rather than on click: on iOS Safari
    there is no WebCodecs at all, and a Render button that only explains itself

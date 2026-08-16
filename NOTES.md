@@ -508,13 +508,36 @@ It is deliberately **not** in presets — it describes the device you are at, no
 the look. A preset saved on a desktop must not force a phone to full pixel
 ratio.
 
-### iOS file pickers and `accept`
+### iOS file pickers and `accept` — this bites every input
 
-`accept="audio/*"` greys out every audio file in the iOS Files picker — it
-matches against the system UTI rather than the extension, so ordinary
-.wav/.mp3/.aiff on disk fail the filter and cannot be selected at all. The fix
-is to list explicit extensions alongside the wildcard. The same trap applies to
-the splat picker if it ever needs broadening.
+iOS matches a file input's `accept` against **registered system UTIs**, not
+against the filename. Anything it cannot resolve to a known type is greyed out,
+and since a picker with nothing selectable gives no error, it reads as the app
+being broken.
+
+It hit both inputs for slightly different reasons:
+
+- **Audio.** `accept="audio/*"` alone greys out ordinary .wav/.mp3/.aiff.
+  Fixed by listing explicit extensions alongside the wildcard.
+- **Splats.** `.ply .spz .splat .ksplat .sog` have no registered UTI at all, so
+  listing extensions does not help — there is nothing to resolve them to.
+
+The only reliable fix for the splat case is to **drop `accept` entirely on
+touch devices**, which is done under `(pointer: coarse)`. Desktop keeps its
+filters, where they behave correctly.
+
+That leaves every picker unfiltered on mobile, so all three buttons and the
+drop target now route through one `handleFile()` that dispatches on extension.
+Tapping "Choose file" and picking a .json loads it as a preset rather than
+failing — the right behaviour once the OS will not filter for us. Unknown
+extensions get a named error listing what is accepted.
+
+**Rule for any new file input: never rely on `accept` to gate correctness.**
+Validate after selection instead.
+
+`.ply` is now verified end-to-end through this path (a 11 MB capture, 44,296
+gaussians, `type: ""` as iOS reports it) — until now every load test had used
+the remote `.spz`, so the PLY decoder had never actually been exercised.
 
 ### Audio follows the transport
 
