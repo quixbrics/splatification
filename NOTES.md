@@ -527,11 +527,15 @@ without re-testing export.
    `SplatEditSdfType`.~~ **Done** — see the Region section above. Cut, crop and
    colorize across six shapes, animatable and persisted like any other
    parameter.
-5. Multiple `SplatMesh` instances in one scene with independent transforms.
-6. Depth pass output for compositing.
-7. Audio-reactive parameter drive (Web Audio FFT → uniforms). This is the reason
+5. Depth pass output for compositing.
+6. Audio-reactive parameter drive (Web Audio FFT → uniforms). This is the reason
    for building this rather than using an AE plugin.
-8. Mobile: `lod: true` plus reduced pixel ratio, gated behind a toggle.
+7. Mobile: `lod: true` plus reduced pixel ratio, gated behind a toggle.
+8. Multiple `SplatMesh` instances in one scene with independent transforms.
+   **Deferred to last on 2026-08-16** — not needed at this stage. Nothing is
+   blocked on it, and the Region work already anticipates it: edits are scoped
+   per mesh via `mesh.add(edit)`, so regions will not leak between meshes when
+   this does land.
 
 ## Non-goals
 
