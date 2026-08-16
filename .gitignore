@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+
+# Local backups taken before in-place edits
+*.bak
+
+# Splat captures. These are large binaries and are data, not source.
+# The app loads a remote test asset (butterfly.spz) so the repo stays
+# runnable without them. Drop a capture in the folder to work locally.
+*.ply
+*.spz
+*.splat
+*.ksplat
+*.sog
+
+# Exported video
+*.mp4

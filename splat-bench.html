@@ -1,0 +1,785 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SPLAT BENCH — 3DGS manipulator</title>
+<style>
+  :root{
+    --void:#08090b;
+    --chassis:#101216;
+    --chassis-hi:#161920;
+    --rule:#1e222a;
+    --ink:#cfd4da;
+    --ink-dim:#737b86;
+    --signal:#9fe0d4;
+    --live:#ff5a3c;
+    --rail:340px;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{
+    background:var(--void); color:var(--ink);
+    font-family:var(--mono); font-size:11px; line-height:1.45;
+    overflow:hidden; -webkit-font-smoothing:antialiased;
+  }
+  canvas{display:block}
+
+  #stage{position:fixed; inset:0 var(--rail) 64px 0; background:var(--void)}
+  #rail{
+    position:fixed; top:0; right:0; bottom:0; width:var(--rail);
+    background:var(--chassis); border-left:1px solid var(--rule);
+    overflow-y:auto; overscroll-behavior:contain;
+  }
+  #transport{
+    position:fixed; left:0; right:var(--rail); bottom:0; height:64px;
+    background:var(--chassis); border-top:1px solid var(--rule);
+    display:flex; align-items:center; gap:14px; padding:0 16px;
+  }
+
+  #osd{
+    position:fixed; left:16px; top:14px; pointer-events:none;
+    color:var(--signal); font-size:10px; letter-spacing:.09em;
+    text-transform:uppercase; opacity:.82;
+  }
+  #osd b{font-weight:400; color:var(--ink-dim); display:inline-block; width:74px}
+  #osd span{font-variant-numeric:tabular-nums}
+
+  #drop{
+    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    flex-direction:column; gap:14px; text-align:center; padding:24px;
+  }
+  #drop.hide{display:none}
+  #drop h1{
+    font-size:13px; font-weight:400; letter-spacing:.34em; text-transform:uppercase;
+    margin:0; color:var(--ink);
+  }
+  #drop p{margin:0; color:var(--ink-dim); max-width:44ch; letter-spacing:.02em}
+  body.dragging #stage{outline:1px solid var(--signal); outline-offset:-9px}
+
+  .mod{border-bottom:1px solid var(--rule); padding:14px 16px 16px}
+  .mod > h2{
+    margin:0 0 12px; font-size:10px; font-weight:400;
+    letter-spacing:.24em; text-transform:uppercase; color:var(--ink-dim);
+    display:flex; justify-content:space-between; align-items:baseline;
+  }
+  .mod > h2 em{font-style:normal; color:var(--rule)}
+
+  .row{display:grid; grid-template-columns:1fr auto 54px; gap:8px; align-items:center; margin-bottom:7px}
+  .row label{color:var(--ink-dim); letter-spacing:.05em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .row output{color:var(--signal); text-align:right; font-variant-numeric:tabular-nums; letter-spacing:.02em}
+  .row input[type=range]{grid-column:1 / -1; width:100%}
+  /* Per-parameter reset. Dim until the value differs from its HTML default,
+     so the panel doubles as an at-a-glance "what have I changed" readout. */
+  .rst{
+    appearance:none; background:none; border:0; padding:0; margin:0;
+    width:13px; height:13px; line-height:13px; text-align:center;
+    font:inherit; font-size:11px; cursor:pointer;
+    color:var(--rule); transition:color .12s;
+  }
+  .rst:hover{color:var(--signal); border-color:transparent}
+  .rst:focus-visible{outline:1px solid var(--signal); outline-offset:1px}
+  .rst.dirty{color:var(--ink-dim)}
+  .rst.dirty:hover{color:var(--signal)}
+
+  input[type=range]{-webkit-appearance:none; appearance:none; background:transparent; height:14px; margin:0 0 3px}
+  input[type=range]::-webkit-slider-runnable-track{height:1px; background:var(--rule)}
+  input[type=range]::-moz-range-track{height:1px; background:var(--rule)}
+  input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none; width:2px; height:11px; margin-top:-5px;
+    background:var(--signal); border:0; border-radius:0;
+  }
+  input[type=range]::-moz-range-thumb{width:2px; height:11px; background:var(--signal); border:0; border-radius:0}
+  input[type=range]:focus-visible{outline:1px solid var(--signal); outline-offset:2px}
+
+  button, select{
+    font:inherit; color:var(--ink); background:var(--chassis-hi);
+    border:1px solid var(--rule); border-radius:2px; padding:5px 9px;
+    letter-spacing:.1em; text-transform:uppercase; cursor:pointer;
+  }
+  button:hover{border-color:var(--ink-dim)}
+  button:focus-visible, select:focus-visible{outline:1px solid var(--signal); outline-offset:1px}
+  button[disabled]{opacity:.35; cursor:default}
+  button.on{color:var(--signal); border-color:var(--signal)}
+  button.live{color:var(--live); border-color:var(--live)}
+  .btns{display:flex; gap:6px; flex-wrap:wrap}
+  .check{display:flex; align-items:center; gap:7px; color:var(--ink-dim); cursor:pointer; margin-bottom:7px}
+  .check input{accent-color:var(--signal); margin:0}
+
+  #scrub{flex:1}
+  #clock{color:var(--signal); font-variant-numeric:tabular-nums; letter-spacing:.05em; min-width:120px}
+  #status{padding:9px 16px; color:var(--ink-dim); letter-spacing:.03em; border-bottom:1px solid var(--rule); min-height:34px}
+  #status.warn{color:var(--live)}
+  a{color:var(--signal)}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
+    "@sparkjsdev/spark": "https://sparkjs.dev/releases/spark/2.1.0/spark.module.js",
+    "mp4-muxer": "https://cdn.jsdelivr.net/npm/mp4-muxer@5/+esm"
+  }
+}
+</script>
+</head>
+<body>
+
+<div id="stage">
+  <div id="osd">
+    <div><b>splats</b><span id="t-splats">—</span></div>
+    <div><b>fps</b><span id="t-fps">—</span></div>
+    <div><b>t</b><span id="t-time">—</span></div>
+    <div><b>state</b><span id="t-state">—</span></div>
+  </div>
+  <div id="drop">
+    <h1>Splat Bench</h1>
+    <p>Drop a <strong>.ply</strong> / .spz / .splat / .sog file here, or load the test asset to check the pipeline.</p>
+    <div class="btns" style="justify-content:center">
+      <button id="pick">Choose file</button>
+      <button id="demo">Load test asset</button>
+    </div>
+  </div>
+</div>
+
+<div id="transport">
+  <button id="play">Play</button>
+  <input type="range" id="scrub" min="0" max="1" step="0.0005" value="0">
+  <div id="clock">—</div>
+  <button id="render">Render</button>
+</div>
+
+<aside id="rail">
+  <!-- Every <output> starts as an em dash. If the panel still shows dashes
+       after boot, the module died during evaluation — check the console. -->
+  <div id="status">Booting…</div>
+
+  <section class="mod">
+    <h2>Shot <em>camera</em></h2>
+    <div class="btns" style="margin-bottom:9px">
+      <button id="setA">Set A</button>
+      <button id="setB">Set B</button>
+      <button id="goA">Go A</button>
+      <button id="goB">Go B</button>
+    </div>
+    <label class="check"><input type="checkbox" id="camDrive" checked> Timeline drives camera A→B</label>
+    <div class="row"><label>Ease</label><output id="o-ease">—</output>
+      <input type="range" id="p-ease" min="0" max="1" step="0.01" value="0.8"></div>
+    <div class="row"><label>Duration (s)</label><output id="o-dur">—</output>
+      <input type="range" id="p-dur" min="1" max="30" step="0.5" value="8"></div>
+  </section>
+
+  <section class="mod">
+    <h2>Trim <em>per-splat cull</em></h2>
+    <div class="row"><label>Min opacity</label><output id="o-cullA">—</output>
+      <input type="range" id="p-cullA" min="0" max="1" step="0.005" value="0"></div>
+    <div class="row"><label>Max splat size</label><output id="o-cullS">—</output>
+      <input type="range" id="p-cullS" min="0" max="1" step="0.002" value="1"></div>
+    <div class="row"><label>Size × all</label><output id="o-scale">—</output>
+      <input type="range" id="p-scale" min="0.05" max="3" step="0.01" value="1"></div>
+  </section>
+
+  <section class="mod">
+    <h2>Reveal <em>sweep plane</em></h2>
+    <div class="row"><label>Plane height</label><output id="o-revY">—</output>
+      <input type="range" id="p-revY" min="0" max="1" step="0.002" value="1"></div>
+    <div class="row"><label>Softness</label><output id="o-revS">—</output>
+      <input type="range" id="p-revS" min="0.001" max="1" step="0.001" value="0.15"></div>
+    <div class="row"><label>Shrink into edge</label><output id="o-revK">—</output>
+      <input type="range" id="p-revK" min="0" max="1" step="0.01" value="0.7"></div>
+    <label class="check"><input type="checkbox" id="revAnim"> Timeline sweeps the plane</label>
+    <label class="check"><input type="checkbox" id="revFlip"> Invert (reveal downward)</label>
+  </section>
+
+  <section class="mod">
+    <h2>Displace <em>noise field</em></h2>
+    <div class="row"><label>Amount</label><output id="o-dAmt">—</output>
+      <input type="range" id="p-dAmt" min="0" max="0.5" step="0.001" value="0"></div>
+    <div class="row"><label>Frequency</label><output id="o-dFrq">—</output>
+      <input type="range" id="p-dFrq" min="0.05" max="20" step="0.05" value="2"></div>
+    <div class="row"><label>Drift speed</label><output id="o-dSpd">—</output>
+      <input type="range" id="p-dSpd" min="0" max="3" step="0.01" value="0.3"></div>
+    <div class="row"><label>Per-splat scatter</label><output id="o-dRnd">—</output>
+      <input type="range" id="p-dRnd" min="0" max="1" step="0.01" value="1"></div>
+  </section>
+
+  <section class="mod">
+    <h2>Tint <em>rgb multiply</em></h2>
+    <div class="row"><label>R</label><output id="o-tR">—</output>
+      <input type="range" id="p-tR" min="0" max="2" step="0.01" value="1"></div>
+    <div class="row"><label>G</label><output id="o-tG">—</output>
+      <input type="range" id="p-tG" min="0" max="2" step="0.01" value="1"></div>
+    <div class="row"><label>B</label><output id="o-tB">—</output>
+      <input type="range" id="p-tB" min="0" max="2" step="0.01" value="1"></div>
+  </section>
+
+  <section class="mod">
+    <h2>Output <em>webcodecs</em></h2>
+    <div class="btns" style="margin-bottom:9px">
+      <select id="res">
+        <option value="1280x720">1280 × 720</option>
+        <option value="1920x1080" selected>1920 × 1080</option>
+        <option value="2560x1440">2560 × 1440</option>
+        <option value="1080x1920">1080 × 1920 (vertical)</option>
+      </select>
+      <select id="fps">
+        <option value="24">24 fps</option>
+        <option value="25">25 fps</option>
+        <option value="30" selected>30 fps</option>
+        <option value="60">60 fps</option>
+      </select>
+    </div>
+    <div class="row"><label>Bitrate (Mbps)</label><output id="o-br">—</output>
+      <input type="range" id="p-br" min="2" max="80" step="1" value="20"></div>
+    <div class="row"><label>Sort settle (ms)</label><output id="o-settle">—</output>
+      <input type="range" id="p-settle" min="0" max="200" step="4" value="24"></div>
+    <p style="color:var(--ink-dim); margin:8px 0 0">
+      Settle waits for Spark's async depth sort before each captured frame. Raise it if
+      exported frames show wrong-order blending that the live view doesn't.
+    </p>
+  </section>
+
+  <section class="mod">
+    <h2>Viewport</h2>
+    <div class="row"><label>Pixel ratio</label><output id="o-dpr">—</output>
+      <input type="range" id="p-dpr" min="0.5" max="2" step="0.05" value="1"></div>
+    <label class="check"><input type="checkbox" id="useLod"> Level of detail on next load (large scans)</label>
+    <div class="btns"><button id="reframe">Reframe</button><button id="reload">Load another</button></div>
+  </section>
+</aside>
+
+<input type="file" id="file" accept=".ply,.spz,.splat,.ksplat,.sog,.zip,.rad" hidden>
+
+<script type="module">
+/* ------------------------------------------------------------------ *
+ * Error surface, installed first. A dead module must LOOK dead.
+ * ------------------------------------------------------------------ */
+const $ = (id) => document.getElementById(id);
+const setStatus = (msg, warn = false) => {
+  const el = $("status");
+  el.textContent = msg;
+  el.classList.toggle("warn", warn);
+  if (warn) console.error("[splat-bench]", msg);
+};
+addEventListener("error", (e) => setStatus("JS error: " + e.message, true));
+addEventListener("unhandledrejection", (e) =>
+  setStatus("Async error: " + (e.reason?.message ?? e.reason), true));
+
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { SparkRenderer, SplatMesh, dyno } from "@sparkjsdev/spark";
+import { Muxer, ArrayBufferTarget } from "mp4-muxer";
+
+/* ------------------------------------------------------------------ *
+ * State — declared BEFORE anything that reads it.
+ *
+ * v1 declared `playhead` below the parameter binding block. The temporal
+ * dead zone threw during module evaluation and silently killed every
+ * listener and the render loop underneath it, while the panel still looked
+ * populated because the readouts were hardcoded in HTML. Keep all module
+ * state up here.
+ * ------------------------------------------------------------------ */
+let mesh = null;
+let playhead = 0;                     // normalised timeline position, 0..1
+let radius = 1;                       // scene bounding-sphere radius
+let dpr = 1;
+let playing = false;
+let rendering = false;
+const bounds = { min: -1, max: 1 };   // object-space Y extent
+const P = {};                         // parameter values, keyed by slider id
+
+/* ------------------------------------------------------------------ *
+ * three + spark
+ * ------------------------------------------------------------------ */
+const stage = $("stage");
+const renderer = new THREE.WebGLRenderer({
+  antialias: false,
+  preserveDrawingBuffer: true,        // required for reliable VideoFrame(canvas)
+});
+renderer.setClearColor(0x08090b, 1);
+stage.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, 1, 0.01, 1000);
+camera.position.set(0, 0, 3);
+
+const spark = new SparkRenderer({ renderer });
+scene.add(spark);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+
+function resize() {
+  const w = stage.clientWidth, h = stage.clientHeight;
+  renderer.setPixelRatio(dpr);
+  renderer.setSize(w, h, false);
+  renderer.domElement.style.width = w + "px";
+  renderer.domElement.style.height = h + "px";
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+addEventListener("resize", resize);
+resize();
+
+/* ------------------------------------------------------------------ *
+ * Dyno uniforms.
+ *
+ * Assigning `U.foo.value` is free. Changing the STRUCTURE of the graph
+ * forces a GLSL recompile and needs mesh.updateGenerator(). Add new
+ * effects as nodes gated by an amount uniform that can go to zero —
+ * never rebuild the graph from a slider.
+ * ------------------------------------------------------------------ */
+const Gsplat = dyno.Gsplat;
+if (!Gsplat) setStatus("dyno.Gsplat is undefined — Spark API drift, check the pinned version.", true);
+
+const F = (v) => dyno.dynoFloat(v);
+const U = {
+  time:    F(0),
+  cullA:   F(0),
+  cullS:   F(9),
+  sizeMul: F(1),
+  revY:    F(1e6),
+  revS:    F(0.15),
+  revK:    F(0.7),
+  revFlip: F(0),
+  dAmt:    F(0),
+  dFrq:    F(2),
+  dSpd:    F(0.3),
+  dRnd:    F(1),
+  tint:    dyno.dynoVec3(new THREE.Vector3(1, 1, 1)),
+};
+
+const _consts = {};
+const c = (x) => (_consts[x] ??= dyno.dynoConst("float", x));
+const ONE3 = dyno.dynoConst("vec3", new THREE.Vector3(1, 1, 1));
+
+function buildModifier() {
+  return dyno.dynoBlock({ gsplat: Gsplat }, { gsplat: Gsplat }, ({ gsplat }) => {
+    const g = dyno.splitGsplat(gsplat).outputs;
+    let center = g.center;
+    let scales = g.scales;
+    const rgba0 = g.rgba;
+
+    /* --- displace: sin field × per-splat random direction -------------
+       Operands kept strictly vec3-vs-vec3 or vec3-vs-float. Mixed-type
+       adds are legal GLSL but the dyno wrappers are unverified. */
+    const tv = dyno.mul(ONE3, dyno.mul(U.time, U.dSpd));               // vec3
+    const p = dyno.add(dyno.mul(dyno.swizzle(center, "yzx"), U.dFrq), tv);
+    const field = dyno.sin(p);                                         // vec3, -1..1
+    const rnd = dyno.sub(dyno.mul(dyno.hashVec3(g.index), c(2)), ONE3);// vec3, -1..1
+    const dir = dyno.add(ONE3, dyno.mul(dyno.sub(rnd, ONE3), U.dRnd));
+    center = dyno.add(center, dyno.mul(dyno.mul(field, dir), U.dAmt));
+
+    /* --- reveal: soft sweep plane along object-space Y ---------------- */
+    const y = dyno.swizzle(center, "y");
+    const above = dyno.smoothstep(dyno.sub(U.revY, U.revS), U.revY, y);
+    const below = dyno.sub(c(1), above);
+    const vis = dyno.mix(below, above, U.revFlip);
+
+    // shrink splats into the edge rather than only fading them
+    scales = dyno.mul(scales, dyno.mul(U.sizeMul, dyno.mix(c(1), vis, U.revK)));
+
+    /* --- colour + alpha ------------------------------------------------ */
+    const rgb = dyno.mul(dyno.swizzle(rgba0, "xyz"), U.tint);
+    const alpha0 = dyno.swizzle(rgba0, "w");
+    let alpha = dyno.mul(alpha0, vis);
+
+    /* --- trim: zero alpha for faint or oversized gaussians -------------
+       swizzle() rather than split() — split's output keys were an
+       assumption, swizzle is documented. */
+    const maxScale = dyno.max(
+      dyno.max(dyno.swizzle(scales, "x"), dyno.swizzle(scales, "y")),
+      dyno.swizzle(scales, "z"),
+    );
+    const keep = dyno.and(
+      dyno.greaterThanEqual(alpha0, U.cullA),
+      dyno.lessThanEqual(maxScale, U.cullS),
+    );
+    alpha = dyno.select(keep, alpha, c(0));
+
+    const rgba = dyno.extendVec(rgb, alpha);
+    return { gsplat: dyno.combineGsplat({ gsplat, center, scales, rgba }) };
+  });
+}
+
+/* ------------------------------------------------------------------ *
+ * Parameters — two passes, so no handler ever runs against a
+ * half-populated P.
+ * ------------------------------------------------------------------ */
+const SPEC = [
+  ["ease", 2], ["dur", 1],
+  ["cullA", 2], ["cullS", 4], ["scale", 2],
+  ["revY", 3], ["revS", 3], ["revK", 2],
+  ["dAmt", 3], ["dFrq", 2], ["dSpd", 2], ["dRnd", 2],
+  ["tR", 2], ["tG", 2], ["tB", 2],
+  ["br", 0], ["settle", 0], ["dpr", 2],
+];
+
+/* cullS is the one parameter whose slider is NOT the value itself.
+   Measured on the butterfly, the whole useful band of the old linear
+   0.001..9 slider was 0.001..0.01 — the first 0.1% of travel, with the
+   remaining 99.9% doing nothing at all. Per-splat scales are small absolute
+   sigmas; as a fraction of scene radius they cluster near zero, so a linear
+   slider cannot address them. P.cullS is a 0..1 perceptual position mapped
+   exponentially onto the threshold. The `* radius` normalisation stays —
+   it was never the problem, the range was. */
+const CULL_MIN = 0.0002, CULL_MAX = 0.1;
+const cullSize = () => CULL_MIN * Math.pow(CULL_MAX / CULL_MIN, P.cullS);
+
+/* Readout override for parameters whose slider position is not the value. */
+const SHOW = { cullS: () => cullSize().toFixed(4) };
+const readout = (id, digits) => SHOW[id] ? SHOW[id]() : P[id].toFixed(digits);
+
+/* Snapped defaults, captured before any listener can fire. A slider whose
+   `value` attribute is not on its own min/step grid gets silently rounded by
+   the browser, so `defaultValue` (the raw attribute) can differ from the value
+   the control actually holds at boot — revS shipped that way, showing 0.151
+   for a declared 0.15. Capturing the real boot value makes reset exact. */
+const DEFAULT = {};
+
+for (const [id, digits] of SPEC) {          // pass 1: values only
+  DEFAULT[id] = $("p-" + id).value;
+  P[id] = parseFloat($("p-" + id).value);
+  $("o-" + id).textContent = readout(id, digits);
+}
+for (const [id, digits] of SPEC) {          // pass 2: listeners
+  $("p-" + id).addEventListener("input", (e) => {
+    P[id] = parseFloat(e.target.value);
+    $("o-" + id).textContent = readout(id, digits);
+    if (id === "dpr") { dpr = P.dpr; resize(); }
+    if (id === "dur") updateClock();
+    markDirty(id);
+    pushUniforms();
+  });
+}
+
+/* Per-parameter reset ------------------------------------------------
+   The authoritative default is the slider's own `value` attribute in the
+   HTML, which the DOM exposes as `defaultValue` and which does NOT change
+   as the user drags. Reading it back means defaults are never duplicated
+   in JS and can never drift out of sync with the markup. */
+function markDirty(id) {
+  const el = $("p-" + id);
+  el.parentElement.querySelector(".rst")
+    ?.classList.toggle("dirty", el.value !== DEFAULT[id]);
+}
+
+for (const [id, digits] of SPEC) {
+  const el = $("p-" + id);
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "rst";
+  btn.textContent = "\u21ba";
+  btn.title = `Reset ${id} to ${SHOW[id] ? "default" : DEFAULT[id]}`;
+  btn.setAttribute("aria-label", `Reset ${id} to default`);
+  btn.addEventListener("click", () => {
+    el.value = DEFAULT[id];
+    // one code path for user drags and resets alike
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  el.parentElement.insertBefore(btn, $("o-" + id));
+  markDirty(id);
+}
+for (const id of ["revAnim", "revFlip", "camDrive"]) {
+  $(id).addEventListener("change", pushUniforms);
+}
+
+/* Sliders are normalised against scene extent so they behave the same on
+   any capture. Never feed a raw slider value into a world-space uniform. */
+function pushUniforms() {
+  const span = (bounds.max - bounds.min) || 1;
+  const sweep = $("revAnim").checked ? playhead : P.revY;
+
+  U.time.value    = playhead * P.dur;
+  U.cullA.value   = P.cullA;
+  U.cullS.value   = cullSize() * radius;
+  U.sizeMul.value = P.scale;
+  U.revY.value    = bounds.min + sweep * span * 1.02;
+  U.revS.value    = Math.max(P.revS * span, 1e-5);
+  U.revK.value    = P.revK;
+  U.revFlip.value = $("revFlip").checked ? 1 : 0;
+  U.dAmt.value    = P.dAmt * radius;
+  U.dFrq.value    = P.dFrq / Math.max(radius, 1e-6);
+  U.dSpd.value    = P.dSpd;
+  U.dRnd.value    = P.dRnd;
+  U.tint.value.set(P.tR, P.tG, P.tB);
+
+  /* Spark gates the generate pass on `viewChanged || version changed`
+     (spark.module.js 2.1.0, ~line 10210). Writing a dyno uniform's .value
+     does neither, so without this bump the modifier output stays baked and
+     every effect below is invisible until the camera happens to move.
+     This is cheap — it increments an integer, it does NOT recompile GLSL. */
+  mesh?.updateVersion();
+}
+
+function updateClock() {
+  $("clock").textContent =
+    `${(playhead * P.dur).toFixed(2).padStart(5, "0")} / ${P.dur.toFixed(2)} s`;
+  $("t-time").textContent = playhead.toFixed(3);
+}
+
+/* ------------------------------------------------------------------ *
+ * Loading
+ * ------------------------------------------------------------------ */
+const splatCount = (m) => m?.numSplats ?? m?.packedSplats?.numSplats ?? 0;
+
+async function loadSplat(source, label) {
+  if (rendering) { setStatus("Busy rendering — wait for the export to finish.", true); return; }
+  if (mesh) { scene.remove(mesh); mesh.dispose?.(); mesh = null; }
+
+  setStatus(`Loading ${label}…`);
+  $("drop").classList.add("hide");
+  $("t-state").textContent = "loading";
+
+  const opts = {
+    objectModifiers: [buildModifier()],
+    onProgress: (e) => {
+      if (e.lengthComputable) {
+        setStatus(`Loading ${label} — ${Math.round((e.loaded / e.total) * 100)}%`);
+      }
+    },
+  };
+  if ($("useLod").checked) { opts.lod = true; opts.lodAbove = 500000; }
+  if (typeof source === "string") opts.url = source;
+  else { opts.fileBytes = source.bytes; opts.fileName = source.name; }
+
+  try {
+    mesh = new SplatMesh(opts);
+    scene.add(mesh);
+    await mesh.initialized;
+
+    // splat captures are usually Y-down relative to three.js
+    mesh.quaternion.set(1, 0, 0, 0);
+    mesh.updateMatrixWorld(true);
+    reframe();
+
+    const n = splatCount(mesh).toLocaleString();
+    $("t-splats").textContent = n;
+    $("t-state").textContent = "idle";
+    setStatus(`${label} — ${n} gaussians.`);
+  } catch (err) {
+    console.error(err);
+    setStatus(`Load failed: ${err.message}`, true);
+    $("t-state").textContent = "error";
+    $("drop").classList.remove("hide");
+    if (mesh) { scene.remove(mesh); mesh = null; }
+  }
+}
+
+function reframe() {
+  if (!mesh) return;
+  mesh.updateMatrixWorld(true);
+  const box = mesh.getBoundingBox(true).applyMatrix4(mesh.matrixWorld);
+  const sphere = box.getBoundingSphere(new THREE.Sphere());
+  radius = Math.max(sphere.radius, 1e-4);
+  bounds.min = box.min.y;
+  bounds.max = box.max.y;
+
+  controls.target.copy(sphere.center);
+  camera.position.copy(sphere.center).add(new THREE.Vector3(0, 0, radius * 2.6));
+  camera.near = radius / 200;
+  camera.far = radius * 60;
+  camera.updateProjectionMatrix();
+  controls.update();
+  pushUniforms();
+}
+
+$("pick").onclick = $("reload").onclick = () => $("file").click();
+$("reframe").onclick = reframe;
+$("demo").onclick = () => loadSplat("https://sparkjs.dev/assets/splats/butterfly.spz", "butterfly.spz");
+$("file").onchange = async (e) => {
+  const f = e.target.files?.[0]; if (!f) return;
+  loadSplat({ bytes: new Uint8Array(await f.arrayBuffer()), name: f.name }, f.name);
+};
+addEventListener("dragover", (e) => { e.preventDefault(); document.body.classList.add("dragging"); });
+addEventListener("dragleave", () => document.body.classList.remove("dragging"));
+addEventListener("drop", async (e) => {
+  e.preventDefault();
+  document.body.classList.remove("dragging");
+  const f = e.dataTransfer.files?.[0]; if (!f) return;
+  loadSplat({ bytes: new Uint8Array(await f.arrayBuffer()), name: f.name }, f.name);
+});
+
+/* ------------------------------------------------------------------ *
+ * Camera keyframes A / B
+ * ------------------------------------------------------------------ */
+const key = { A: null, B: null };
+const grab = () => ({ pos: camera.position.clone(), tgt: controls.target.clone() });
+const apply = (k, at) => {
+  if (!k) return;
+  camera.position.copy(k.pos);
+  controls.target.copy(k.tgt);
+  controls.update();
+
+  /* driveCamera() runs every frame and rewrites the camera from `playhead`,
+     so with camDrive on it used to clobber this on the very next frame and
+     Go A / Go B looked dead. Move the playhead to the matching end of the
+     timeline instead, so the drive agrees with the button rather than
+     fighting it. Only meaningful once both keys exist. */
+  if ($("camDrive").checked && key.A && key.B) {
+    playhead = at;
+    $("scrub").value = at;
+    pushUniforms();
+    updateClock();
+  }
+};
+$("setA").onclick = () => { key.A = grab(); $("setA").classList.add("on"); };
+$("setB").onclick = () => { key.B = grab(); $("setB").classList.add("on"); };
+$("goA").onclick = () => apply(key.A, 0);
+$("goB").onclick = () => apply(key.B, 1);
+
+const ease = (x, k) => (k <= 0 ? x : x * x * (3 - 2 * x) * k + x * (1 - k));
+function driveCamera() {
+  if (!$("camDrive").checked || !key.A || !key.B) return;
+  const u = ease(playhead, P.ease);
+  camera.position.lerpVectors(key.A.pos, key.B.pos, u);
+  controls.target.lerpVectors(key.A.tgt, key.B.tgt, u);
+  camera.lookAt(controls.target);
+}
+
+/* ------------------------------------------------------------------ *
+ * Transport + live loop
+ * ------------------------------------------------------------------ */
+let lastT = performance.now(), fpsAvg = 0;
+
+$("play").onclick = () => {
+  playing = !playing;
+  $("play").textContent = playing ? "Pause" : "Play";
+  $("play").classList.toggle("on", playing);
+};
+$("scrub").addEventListener("input", (e) => {
+  playhead = parseFloat(e.target.value);
+  pushUniforms();
+  updateClock();
+});
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  if (rendering) return;                    // the offline loop owns the canvas
+  const dt = Math.min((now - lastT) / 1000, 0.1);
+  lastT = now;
+  if (playing) {
+    playhead = (playhead + dt / P.dur) % 1;
+    $("scrub").value = playhead;
+    pushUniforms();
+    updateClock();
+  }
+  fpsAvg = fpsAvg * 0.9 + (1 / Math.max(dt, 1e-4)) * 0.1;
+  $("t-fps").textContent = fpsAvg.toFixed(0);
+  driveCamera();
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+/* ------------------------------------------------------------------ *
+ * Offline render — WebCodecs + mp4-muxer. Chrome / Edge only.
+ * ------------------------------------------------------------------ */
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+$("render").onclick = async () => {
+  if (!mesh) { setStatus("Load a splat first.", true); return; }
+  if (rendering) return;
+  if (typeof VideoEncoder === "undefined") {
+    setStatus("No WebCodecs VideoEncoder in this browser. Use Chrome or Edge.", true);
+    return;
+  }
+
+  const [w, h] = $("res").value.split("x").map(Number);
+  const fps = parseInt($("fps").value, 10);
+  const total = Math.max(Math.round(P.dur * fps), 1);
+  const savedPlayhead = playhead;
+
+  rendering = true;
+  $("render").classList.add("live");
+  $("t-state").textContent = "rendering";
+
+  let encoder = null;
+  try {
+    const muxer = new Muxer({
+      target: new ArrayBufferTarget(),
+      video: { codec: "avc", width: w, height: h, frameRate: fps },
+      fastStart: "in-memory",
+    });
+    encoder = new VideoEncoder({
+      output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+      error: (e) => setStatus("Encoder error: " + e.message, true),
+    });
+    encoder.configure({
+      codec: "avc1.640033",
+      width: w, height: h,
+      bitrate: P.br * 1000000,
+      framerate: fps,
+      latencyMode: "quality",
+    });
+
+    // fixed output size, independent of the viewport
+    renderer.setPixelRatio(1);
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+
+    for (let i = 0; i < total; i++) {
+      playhead = total > 1 ? i / (total - 1) : 0;
+      pushUniforms();
+      driveCamera();
+      controls.update();
+
+      /* Spark sorts splats asynchronously off a GPU readback, so the first
+         render after a camera move can blend in stale order. Render, wait,
+         render again, then capture. The wait is a guess — see NOTES.md. */
+      renderer.render(scene, camera);
+      if (P.settle > 0) await sleep(P.settle);
+      renderer.render(scene, camera);
+
+      const vf = new VideoFrame(renderer.domElement, {
+        timestamp: Math.round((i * 1e6) / fps),
+        duration: Math.round(1e6 / fps),
+      });
+      encoder.encode(vf, { keyFrame: i % (fps * 2) === 0 });
+      vf.close();
+
+      while (encoder.encodeQueueSize > 8) await sleep(2);
+      if (i % 4 === 0) {
+        setStatus(`Rendering ${i + 1} / ${total} frames…`);
+        $("t-state").textContent = `${Math.round(((i + 1) / total) * 100)}%`;
+      }
+    }
+
+    await encoder.flush();
+    muxer.finalize();
+    const blob = new Blob([muxer.target.buffer], { type: "video/mp4" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `splat-bench-${Date.now()}.mp4`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    setStatus(`Rendered ${total} frames — ${(blob.size / 1e6).toFixed(1)} MB.`);
+  } catch (err) {
+    console.error(err);
+    setStatus("Render failed: " + err.message, true);
+  } finally {
+    if (encoder && encoder.state !== "closed") encoder.close();
+    rendering = false;
+    $("render").classList.remove("live");
+    $("t-state").textContent = "idle";
+    playhead = savedPlayhead;
+    pushUniforms();
+    resize();
+  }
+};
+
+/* ------------------------------------------------------------------ *
+ * Boot
+ * ------------------------------------------------------------------ */
+pushUniforms();
+updateClock();
+$("t-state").textContent = "idle";
+setStatus("No splat loaded — drop a file on the viewport.");
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
