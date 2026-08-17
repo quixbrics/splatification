@@ -1031,6 +1031,83 @@ audio-modulated sliders sitting at their manual position while the shader used
 something else. It now uses `isDriven(id)` — envelope *or* audio. This file has
 been bitten before by a panel that lies about the state; do not reintroduce it.
 
+## Audio shaping
+
+Per-route shaping sits behind a `SHAPE` disclosure on each parameter's audio
+panel: `attack` (0–500ms), `release` (0–2000ms), `lag` (-500..500ms), `gain`
+(0–4), `floor` (0–1), `curve` (0.25–4). Fixed order:
+
+```
+raw → gate(floor) → ×gain → ^curve → clamp 0..1 → asymmetric one-pole (attack/release) → shift by lag
+```
+
+then the existing `depth × parameterRange` modulation applies on top, unchanged.
+
+### Offline pass, cached, never sampled at lookup time
+
+Like the base envelope itself, shaping is computed once over the whole band
+array and cached (`shapeCache`, keyed on band + attack/release/gain/floor/curve),
+not applied sample-by-sample during playback. The one-pole smoothing is
+sequential — each output sample depends on the previous one — so if it ran at
+lookup time, scrubbing backwards or exporting out of frame order would produce
+different results than forward playback. Precomputing the whole shaped array
+up front makes `routeLevel()` a pure function of timeline position again, same
+determinism guarantee as the base envelope. `lag` and `depth` are deliberately
+excluded from the cache key: `lag` is applied as a time shift at sample time
+(`routeLevel` subtracts `lag/1000` before indexing), not baked into the array,
+and `depth` is applied even later during modulation — baking either in would
+multiply the number of cache entries for no benefit.
+
+Cache is cleared in the two places the underlying envelope can change:
+`analyseAudio()` (new track) and the `Clear` button (envelope wiped).
+
+### Verified against the same synthetic fixture
+
+Using `bandtest.wav` (see above) and the low band via `window.__bench`:
+
+- **Identity at neutral**: `attack=0, release=0` reproduces the raw envelope to
+  full float precision — `routeLevel` with neutral shaping bit-matches direct
+  envelope sampling. (The raw low-band value at t=1s now measures 0.85 rather
+  than the 0.78 in the table above — traced to drift in the `bandtest.wav`
+  fixture/analysis pipeline since that table was written, not a shaping
+  regression; the identity-transform proof holds independent of the absolute
+  number.)
+- **Release smoothing**: `release=1000` — value at t=2.5s measured 0.5484,
+  well above the unshaped 0.0412 at that point, decaying monotonically through
+  t=4.0s.
+- **Lag**: the true low-band peak is at t=0.7s (not t=1.0s). `lag=+250`ms
+  shifts it to measure 0.95 at t=0.95s; `lag=-250`ms measures 0.45 at the
+  correspondingly earlier point — both exactly ±0.25s.
+- **Floor gating**: `floor=0.5` zeroes measured off-band bleed (was
+  0.093–0.102) while leaving the genuine peak untouched (0.997 at t=3).
+- **Gain/curve order**: `gain=2, curve=2` — hand-computed
+  `min(1, (raw×2)^2)` = 0.041872 matches the measured value to 6 decimals,
+  confirming gain is applied before curve, not after.
+- **Export determinism**: two independent 30-frame/1280×720/30fps exports with
+  shaping active produced bit-identical `ffprobe signalstats` YAVG across all
+  30 frames (max diff 0.0).
+
+### Performance
+
+Measured directly against a genuine 60,000-sample array (5 minutes at the
+200 Hz envelope rate, not extrapolated from a smaller run): steady state
+~2ms per recompute, worst case 9.1ms on first call (JIT warmup). Comfortably
+under the 16ms frame budget, so no Web Worker — the plan's stated fallback —
+was needed.
+
+### Preset round-trip
+
+The six shaping fields are serialized into each `audio.routes[id]` entry
+alongside `band`/`depth` and are additive on `PRESET_VERSION`. Loading an
+older preset (no shaping fields present) needed care: `Number(v) ?? def` looks
+like a safe default-coalesce but is not — `Number(undefined)` is `NaN`, and
+`NaN ?? def` still evaluates to `NaN` because `??` only falls through on
+`null`/`undefined`. Fixed with an explicit `Number.isFinite` check
+(`num(v, def) = Number.isFinite(v) ? v : def`) before this shipped, not after
+a bug report. Round-tripped through the actual UI (save → wipe → load) with
+distinctive values (attack 80, release 600, gain 1.8, floor 0.05, curve 1.6)
+and confirmed byte-exact.
+
 ---
 
 ## Mobile
@@ -1157,6 +1234,15 @@ style. A hidden tab does not advance CSS transitions, so the computed value
 stays frozen at its start. Setting `transition: none` before measuring gives
 the true value (top 152, exactly as designed). Same family as the rAF stall
 behind `?debug=1`.
+
+### Audio shaping sparkline is desktop-only
+
+`#audSpark{display:none}` on mobile via the same coarse-pointer media query as
+the rest of the mobile rail — a canvas redraw on every playhead tick is not
+worth the cost on a touch device, and the shaping sliders (which is where the
+actual editing happens) stay visible and full-width in a single-column grid.
+Verified in the mobile iframe: `display: none` on the canvas, single-column
+`grid-template-columns` on the rows, panel still opens via the `SHAPE` toggle.
 
 ---
 

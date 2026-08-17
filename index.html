@@ -78,6 +78,18 @@
      NOTES. Plain positioned divs, not a canvas: far simpler than extending
      drawLane()'s per-parameter renderer for a row that has no Y-axis value
      to plot, only a position on the timeline. */
+  /* Audio shaping — a disclosure, not always-on: eight controls per route
+     is exactly the point where a flat list stops working, per NOTES. Band
+     and depth stay on the always-visible laneHead row since they are the
+     two anyone actually touches; everything else lives here. */
+  #audShapePanel{
+    flex:0 0 auto; border-bottom:1px solid var(--rule); background:var(--chassis);
+    padding:8px 16px;
+  }
+  #audShapePanel.hide{display:none}
+  #audSpark{width:100%; height:34px; display:block; margin-bottom:6px}
+  #audShapeRows{display:grid; grid-template-columns:1fr 1fr; gap:0 16px}
+  #audShapeRows .row{margin-bottom:5px}
   #camRow{
     position:relative; height:16px; flex:0 0 auto;
     border-bottom:1px solid var(--rule); background:var(--chassis);
@@ -316,6 +328,10 @@
     /* Reading and hitting ticks on a 390px-wide strip is not viable — drop
        the row, keep Add key / Remove key working from the Shot section. */
     #camRow{ display:none }
+    /* Sparkline is the one thing genuinely not viable on a 390px strip;
+       shaping sliders stay — fiddly on touch, per the plan, but usable. */
+    #audSpark{ display:none }
+    #audShapeRows{ grid-template-columns:1fr }
   }
 
 </style>
@@ -389,6 +405,7 @@
     <input type="range" id="audDepth" min="-1" max="1" step="0.01" value="0"
            title="Modulation depth, as a fraction of the parameter's full range">
     <output id="o-audDepth">0.00</output>
+    <button id="audShapeToggle" title="Attack/release/lag/gain/floor/curve shaping" disabled>Shape ▾</button>
     <span class="lsep"></span>
     <label class="audlbl">Mask</label>
     <select id="maskSrc" title="Scope this parameter to one region slot's mask">
@@ -399,6 +416,23 @@
       <option value="4">R4</option>
     </select>
     <label class="check"><input type="checkbox" id="maskInv" title="Invert the mask for this parameter only"> Inv</label>
+  </div>
+  <div id="audShapePanel" class="hide">
+    <canvas id="audSpark"></canvas>
+    <div id="audShapeRows">
+      <div class="row"><label>Attack</label><output id="o-audAttack">—</output>
+        <input type="range" id="audAttack" min="0" max="500" step="1" value="0"></div>
+      <div class="row"><label>Release</label><output id="o-audRelease">—</output>
+        <input type="range" id="audRelease" min="0" max="2000" step="1" value="120"></div>
+      <div class="row"><label>Lag</label><output id="o-audLag">—</output>
+        <input type="range" id="audLag" min="-500" max="500" step="1" value="0"></div>
+      <div class="row"><label>Gain</label><output id="o-audGain">—</output>
+        <input type="range" id="audGain" min="0" max="4" step="0.01" value="1"></div>
+      <div class="row"><label>Floor</label><output id="o-audFloor">—</output>
+        <input type="range" id="audFloor" min="0" max="1" step="0.005" value="0"></div>
+      <div class="row"><label>Curve</label><output id="o-audCurve">—</output>
+        <input type="range" id="audCurve" min="0.25" max="4" step="0.01" value="1"></div>
+    </div>
   </div>
   <div id="camRow" title="Camera keyframes — click a tick to jump there, alt-click to delete">
     <div id="camRowHint">no camera keyframes</div>
@@ -1209,8 +1243,9 @@ function envValue(id, t) {
 const BANDS = { low: [20, 200], mid: [200, 2000], high: [2000, 16000] };
 const ENV_RATE = 200;                 // envelope samples per second
 
-const AUD = {};                       // id -> { band, depth }
-const audOf = (id) => (AUD[id] ??= { band: "", depth: 0 });
+const AUD = {};                       // id -> { band, depth, attack, release, lag, gain, floor, curve }
+const audOf = (id) =>
+  (AUD[id] ??= { band: "", depth: 0, attack: 0, release: 120, lag: 0, gain: 1, floor: 0, curve: 1 });
 
 let audioName = null;
 let audioDur = 0;
@@ -1260,6 +1295,7 @@ async function analyseAudio(arrayBuffer, name) {
   audioEnv = env;
   audioDur = buf.duration;
   audioName = name;
+  shapeCache.clear();                 // every cached shaped array points at the OLD track now
   return buf;
 }
 
@@ -1268,11 +1304,97 @@ async function analyseAudio(arrayBuffer, name) {
    used, which is what you want when cutting to a specific passage. */
 function audioAt(band, seconds) {
   if (!audioEnv || !audioEnv[band]) return 0;
-  const arr = audioEnv[band];
+  return sampleArr(audioEnv[band], seconds);
+}
+
+function sampleArr(arr, seconds) {
+  if (!arr || !arr.length) return 0;
   const x = Math.min(Math.max(seconds, 0), audioDur) * ENV_RATE;
   const i = Math.floor(x);
   if (i >= arr.length - 1) return arr[arr.length - 1] ?? 0;
   return arr[i] + (arr[i + 1] - arr[i]) * (x - i);   // linear, no stepping
+}
+
+/* ------------------------------------------------------------------ *
+ * Audio shaping — attack/release/gain/floor/curve, applied as an OFFLINE
+ * PASS over the precomputed band envelope, never at lookup time.
+ *
+ * Attack/release smoothing is stateful and sequential — a one-pole filter's
+ * output at sample N depends on sample N-1. Applying it at lookup time would
+ * mean scrubbing backwards gives a DIFFERENT answer than scrubbing forwards
+ * (the filter has no "previous sample" to reference going the other way),
+ * and export would not match what scrubbing showed. The entire reason the
+ * audio analysis is offline in the first place is determinism; a lookup-time
+ * filter throws that straight back away. So shaping runs once, forward,
+ * over the whole track, producing a derived Float32Array exactly like the
+ * unshaped band envelope — same shape, same sample rate, just a different
+ * array to index into.
+ *
+ * Order of operations, fixed: raw -> gate(floor) -> ×gain -> ^curve ->
+ * clamp 0..1 -> asymmetric one-pole (attack/release). Curve runs BEFORE
+ * smoothing deliberately — after smoothing it would distort the envelope
+ * shape attack/release just carefully built, not shape the raw material.
+ *
+ * `lag` and `depth` are NOT part of the cached array. `lag` is a sampling-
+ * index shift (looked up at USE time, not baked into the curve), and
+ * `depth` is an output scale applied after sampling — keeping both out of
+ * the cache key is what lets two routes on the same band with the same
+ * attack/release/gain/floor/curve but DIFFERENT lag or depth share one
+ * derived array, per the plan.
+ * ------------------------------------------------------------------ */
+const shapeCache = new Map();          // "band|attack|release|gain|floor|curve" -> Float32Array
+
+function shapeCacheKey(band, a) {
+  return `${band}|${a.attack}|${a.release}|${a.gain}|${a.floor}|${a.curve}`;
+}
+
+function shapedEnvelope(band, a) {
+  const raw = audioEnv?.[band];
+  if (!raw) return null;
+  const key = shapeCacheKey(band, a);
+  const cached = shapeCache.get(key);
+  if (cached) return cached;
+
+  const n = raw.length;
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    let v = raw[i];
+    v = v < a.floor ? 0 : v;                  // gate
+    v = v * a.gain;                           // gain
+    v = Math.pow(Math.max(v, 0), a.curve);    // curve
+    out[i] = Math.min(1, Math.max(0, v));     // clamp
+  }
+
+  // Asymmetric one-pole: attack while rising, release while falling.
+  // alpha = 1 - exp(-dt/tau) is the standard RC-style per-sample coefficient
+  // for a time constant tau; tau <= 0 collapses to alpha = 1, i.e. no
+  // smoothing at all, which is what makes attack=0/release=0 reproduce the
+  // unshaped table exactly.
+  const dt = 1 / ENV_RATE;
+  let y = n ? out[0] : 0;
+  for (let i = 0; i < n; i++) {
+    const x = out[i];
+    const tauMs = x >= y ? a.attack : a.release;
+    const alpha = tauMs <= 0 ? 1 : 1 - Math.exp(-dt / (tauMs / 1000));
+    y = y + alpha * (x - y);
+    out[i] = y;
+  }
+
+  shapeCache.set(key, out);
+  return out;
+}
+
+/* The per-ROUTE level a parameter actually reads: shaped envelope, then
+   shifted by lag at lookup time (not baked into the cache — see above).
+   Positive lag samples the PAST, so the effect appears to happen LATER;
+   negative lag samples ahead, so it can land on a beat rather than after
+   it — free here, impossible with a realtime tap. */
+function routeLevel(id, seconds) {
+  const a = AUD[id];
+  if (!a || !a.band) return 0;
+  const arr = shapedEnvelope(a.band, a);
+  if (!arr) return 0;
+  return sampleArr(arr, seconds - a.lag / 1000);
 }
 
 const V = {};
@@ -1287,12 +1409,15 @@ function evalParams() {
        it layers with envelopes instead of fighting them: an envelope sets
        the move, audio adds the detail. Depth is a fraction of the
        parameter's own full range, so one depth means the same amount of
-       visible effect on any parameter. */
+       visible effect on any parameter. routeLevel() is this id's own
+       SHAPED level (attack/release/lag/gain/floor/curve), not the raw
+       audioLevel[band] meter value — two routes on the same band can shape
+       it completely differently. */
     const a = AUD[id];
     if (a && a.band && a.depth && !NO_ANIM.has(id)) {
       const el = $("p-" + id);
       const lo = parseFloat(el.min), hi = parseFloat(el.max);
-      v = clampNum(v + a.depth * (hi - lo) * audioLevel[a.band], lo, hi);
+      v = clampNum(v + a.depth * (hi - lo) * routeLevel(id, seconds), lo, hi);
     }
     V[id] = v;
   }
@@ -1553,6 +1678,7 @@ function setPlayhead(t) {
   audioSeek();
   drawLane();
   drawCamRow();
+  drawSparkline();
 }
 
 function laneHead() {
@@ -1572,6 +1698,17 @@ function laneHead() {
   $("audDepth").value = off ? 0 : a.depth;
   $("audDepth").disabled = off || !a.band;
   $("o-audDepth").textContent = (off ? 0 : a.depth).toFixed(2);
+
+  $("audShapeToggle").disabled = off;
+  if (off) $("audShapePanel").classList.add("hide");
+  for (const [id, digits] of [["audAttack", 0], ["audRelease", 0], ["audLag", 0],
+                               ["audGain", 2], ["audFloor", 3], ["audCurve", 2]]) {
+    const key = id.slice(3, 4).toLowerCase() + id.slice(4);   // "audAttack" -> "attack"
+    $(id).value = off ? $(id).defaultValue : a[key];
+    $(id).disabled = off;
+    $("o-" + id).textContent = (off ? parseFloat($(id).defaultValue) : a[key]).toFixed(digits);
+  }
+  drawSparkline();
 
   /* Mask only shows for the 6 maskable parameters (tR/tG/tB share the "tint"
      route). Everything else — including region params themselves, camera,
@@ -2394,6 +2531,7 @@ function frame(now) {
     drawCamRow();
     audMeters();
     drawLane();
+    drawSparkline();
   }
   fpsAvg = fpsAvg * 0.9 + (1 / Math.max(dt, 1e-4)) * 0.1;
   $("t-fps").textContent = fpsAvg.toFixed(0);
@@ -2604,7 +2742,11 @@ function serialize() {
       routes: Object.fromEntries(
         Object.entries(AUD)
           .filter(([, a]) => a.band && a.depth)
-          .map(([id, a]) => [id, { band: a.band, depth: +a.depth.toFixed(4) }]),
+          .map(([id, a]) => [id, {
+            band: a.band, depth: +a.depth.toFixed(4),
+            attack: a.attack, release: a.release, lag: a.lag,
+            gain: +a.gain.toFixed(4), floor: +a.floor.toFixed(4), curve: +a.curve.toFixed(4),
+          }]),
       ),
     },
   };
@@ -2674,12 +2816,26 @@ function applyPreset(o) {
     e.on = !!src.on && e.keys.length > 0;         // an empty envelope cannot be armed
   }
 
-  for (const id of ANIM) { const a = audOf(id); a.band = ""; a.depth = 0; }
+  for (const id of ANIM) {
+    AUD[id] = { band: "", depth: 0, attack: 0, release: 120, lag: 0, gain: 1, floor: 0, curve: 1 };
+  }
   for (const [id, src] of Object.entries(o.audio?.routes ?? {})) {
     if (!ANIM.includes(id)) continue;
     if (!Object.hasOwn(BANDS, src?.band)) continue;
-    audOf(id).band = src.band;
-    audOf(id).depth = clamp(Number(src.depth) || 0, -1, 1);
+    /* Shaping fields are additive (v6, no version bump — same rule as the
+       Region phase's shrink parameter): a v3-v5 preset has none of them, and
+       audOf()'s own defaults above already stand in for "no shaping", which
+       is exactly what an old preset's routes actually meant. */
+    const num = (v, def) => (Number.isFinite(v) ? v : def);
+    const a = audOf(id);
+    a.band = src.band;
+    a.depth = clamp(num(src.depth, 0), -1, 1);
+    a.attack = clamp(num(src.attack, 0), 0, 500);
+    a.release = clamp(num(src.release, 120), 0, 2000);
+    a.lag = clamp(num(src.lag, 0), -500, 500);
+    a.gain = clamp(num(src.gain, 1), 0, 4);
+    a.floor = clamp(num(src.floor, 0), 0, 1);
+    a.curve = clamp(num(src.curve, 1), 0.25, 4);
   }
 
   /* Regions (v4). Wipe first, same replace-not-merge rule as envelopes. */
@@ -2986,6 +3142,75 @@ $("audDepth").oninput = () => {
   pushUniforms();
 };
 
+$("audShapeToggle").onclick = () => {
+  const panel = $("audShapePanel");
+  panel.classList.toggle("hide");
+  $("audShapeToggle").textContent = panel.classList.contains("hide") ? "Shape ▾" : "Shape ▴";
+  if (!panel.classList.contains("hide")) { laneFit(); drawSparkline(); }
+};
+
+/* One listener per shaping slider. Each just writes the field and lets the
+   cache key change naturally on next lookup — no explicit invalidation
+   needed, per NOTES: recompute is cheap enough that a stale Map entry
+   sitting unused costs nothing worth guarding against. */
+for (const [id, key, digits] of [
+  ["audAttack", "attack", 0], ["audRelease", "release", 0], ["audLag", "lag", 0],
+  ["audGain", "gain", 2], ["audFloor", "floor", 3], ["audCurve", "curve", 2],
+]) {
+  $(id).oninput = () => {
+    if (!focused) return;
+    audOf(focused)[key] = parseFloat($(id).value);
+    $("o-" + id).textContent = audOf(focused)[key].toFixed(digits);
+    pushUniforms();
+    drawSparkline();
+  };
+}
+
+/* Shaped-curve preview for whichever parameter is focused, with a playhead
+   marker — per NOTES, "the only affordance that makes attack/release
+   legible; the numbers alone tell you nothing about what the curve is
+   doing." Drawn against the FULL track duration (not the clip Duration),
+   since shaping is a property of the audio analysis, independent of how
+   much of it a given clip actually plays. */
+const sparkCv = $("audSpark");
+function drawSparkline() {
+  if ($("audShapePanel").classList.contains("hide")) return;
+  const s = Math.min(devicePixelRatio || 1, 2);
+  const cw = Math.max(1, Math.round(sparkCv.clientWidth * s));
+  const ch = Math.max(1, Math.round(sparkCv.clientHeight * s));
+  if (sparkCv.width !== cw) sparkCv.width = cw;
+  if (sparkCv.height !== ch) sparkCv.height = ch;
+  const ctx = sparkCv.getContext("2d");
+  ctx.clearRect(0, 0, cw, ch);
+  if (!focused || !audioEnv) return;
+  const a = AUD[focused];
+  if (!a || !a.band) return;
+  const arr = shapedEnvelope(a.band, a);
+  if (!arr || !arr.length) return;
+
+  ctx.strokeStyle = CSSVAR("--signal", "#9fe0d4");
+  ctx.lineWidth = 1.5 * s;
+  ctx.beginPath();
+  const N = Math.max(2, Math.round(cw / (2 * s)));
+  for (let i = 0; i <= N; i++) {
+    const t = i / N;
+    const v = sampleArr(arr, t * audioDur - a.lag / 1000);
+    const X = t * cw, Y = ch - v * ch;
+    i ? ctx.lineTo(X, Y) : ctx.moveTo(X, Y);
+  }
+  ctx.stroke();
+
+  const seconds = playhead * P.dur;
+  if (seconds <= audioDur) {
+    const px = (seconds / Math.max(audioDur, 1e-6)) * cw;
+    ctx.strokeStyle = CSSVAR("--live", "#ff5a3c");
+    ctx.globalAlpha = 0.6;
+    ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, ch); ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+}
+addEventListener("resize", drawSparkline);
+
 $("audLoad").onclick = () => $("audioFile").click();
 
 /* ------------------------------------------------------------------ *
@@ -3077,6 +3302,7 @@ $("audMute").onclick = () => {
 $("audClear").onclick = () => {
   if (audioEl) { audioEl.pause(); URL.revokeObjectURL(audioEl.src); audioEl = null; }
   audioEnv = null; audioName = null; audioDur = 0;
+  shapeCache.clear();
   for (const band of Object.keys(BANDS)) audioLevel[band] = 0;
   $("audName").textContent = "no audio loaded";
   $("audMute").disabled = true;
@@ -3137,6 +3363,12 @@ if (new URLSearchParams(location.search).has("debug")) {
     get P()    { return P; },
     get ENV()  { return ENV; },
     get audio(){ return audioEl; },
+    get audioEnv(){ return audioEnv; },
+    get AUD(){ return AUD; },
+    get audioDur(){ return audioDur; },
+    shapedEnvelope,
+    routeLevel,
+    get shapeCache(){ return shapeCache; },
     get dyno() { return dyno; },          // for verifying stdlib call forms
     get U()    { return U; },
     get gest() { return GEST; },
