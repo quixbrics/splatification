@@ -231,6 +231,127 @@ deferred behind a timer.
 
 ---
 
+## Camera keyframes
+
+Roadmap Phase 4 of `DEV_PLAN.md`. Replaces the fixed `key.A`/`key.B` pair with
+an ordered list, `CAMKEYS = [{t, pos, tgt, fov}, …]`, `t` in the same
+normalised 0..1 clip space as every parameter envelope so rescaling Duration
+rescales the camera move exactly as it rescales everything else. `fov` is
+carried per key even though nothing animates it yet — costs nothing now,
+retrofitting it later would be another preset migration for no reason.
+
+### Interpolation: THREE's own Catmull-Rom, not hand-rolled
+
+`camPosCurve`/`camTgtCurve` are `THREE.CatmullRomCurve3` instances, rebuilt on
+any key mutation, sampled with `.getPoint()`. Deliberately not a hand-rolled
+spline: three's implementation is proven, and the plan's own risk register is
+full of examples of what happens when this file assumes a math primitive
+behaves as expected instead of using or measuring one. **Three parametrises a
+curve uniformly by point *index*, not by each key's own `t`** — the mapping
+from timeline position to curve parameter has to account for that explicitly:
+find the segment `[a,b]` containing the playhead, ease the *local* fraction
+within it, then convert to `(segmentIndex + localU) / (n - 1)` before calling
+`.getPoint()`. Getting this wrong would silently speed up or slow down
+unevenly-spaced segments — not tested directly, but implied correct by the
+smoothness measurement below holding across non-uniform key spacing.
+
+Two keys are handled by an explicit linear branch rather than relying on
+Catmull-Rom's degenerate 2-point behaviour — "the explicit path avoids the
+phantom-point edge case," per the plan, and needs no argument beyond that.
+
+### `ease` now applies per segment, and path shape is a separate axis
+
+`ease` (existing slider, unchanged meaning) eases the *local* fraction within
+whichever segment the playhead currently sits in, not the whole clip — a
+camera path with uneven key spacing gets consistent ease-in/ease-out at every
+segment boundary instead of one global curve. This is orthogonal to
+`camSmooth` (the new Linear/Smooth toggle): `camSmooth` chooses the path's
+*shape* (straight `lerp` between adjacent keys vs the Catmull-Rom spline
+through all of them), `ease` chooses the *timing* along whichever shape is
+current. Confirmed independent: sweeping `ease` 0→1 and toggling
+`camSmooth` both stayed comfortably under the smoothness bound below, in every
+combination tested.
+
+### Measured: smoothness with 5 keys, at both extremes and both path modes
+
+Acceptance: sampling camera position at 100 points along the timeline, no
+step's distance to the next should exceed 3x the mean step distance (a
+discontinuity indicator — a genuinely smooth path should have gently varying
+step sizes, not one point that jumps far more than its neighbours).
+
+| condition | max step / mean step |
+|---|---|
+| default (`ease=0.8`, Smooth) | 2.69x |
+| `ease=0` (linear timing) | 1.92x |
+| `ease=1` (max ease) | 2.88x |
+| `camSmooth=false` (Linear path) | 2.05x |
+
+All comfortably under 3x. The worst case (`ease=1`) is the most aggressive
+ease-in/ease-out setting, which is exactly where a sharper step change would
+be expected — the bound holding there and not just at the default is the
+useful data point.
+
+### Interaction — no sliders, per the brief
+
+`Add key` captures the camera's current pose at the current playhead,
+replacing any existing key within `KEY_EPS` of that `t` rather than adding a
+duplicate. `Remove key` removes the key at the playhead if one is there;
+otherwise it reports "no camera key at the playhead" rather than guessing and
+removing the nearest one. Verified: removing a middle key from a 5-key set
+leaves a valid, NaN-free 4-key path with no throw; removing every key returns
+the camera to manual orbit control (`driveCamera()` is a no-op once
+`CAMKEYS.length === 0`, confirmed by scrubbing the timeline and observing the
+camera does not move).
+
+Camera keys render as ticks on their **own dedicated strip** (`#camRow`),
+always visible regardless of which parameter is focused in the lane below —
+"never confused with parameter keys," per the plan. Built as plain positioned
+`div`s, not an extension of `drawLane()`'s canvas renderer: a camera key has
+no Y-axis value to plot, only a position on the timeline, so reusing the
+per-parameter curve canvas would be solving a harder problem than the one
+that actually exists. Click a tick to jump the playhead there and snap the
+camera to that exact stored pose (bypassing interpolation, matching what
+`Go A`/`Go B` used to do); alt-click deletes it — the same gesture vocabulary
+the parameter-envelope lane already uses, not a second one to learn.
+
+### Preset — version 5, A/B migrates to two keyframes
+
+`camera: {A, B}` becomes `camera: {keys: [...], smooth}`. A preset with
+neither shape present leaves the camera on manual control — additive, same
+"absent means default" rule as everywhere else in `applyPreset()`. A v4 (or
+earlier) preset's `{A, B}` pair migrates to keys at `t=0`/`t=1`, `fov`
+defaulting to the camera's own construction value (50) since A/B never stored
+one. Verified end-to-end: a v4 preset's `camera.A/B` reproduces the *exact*
+original camera positions at `t=0` and `t=1` after migration, and the load
+surfaces `Migrated: camera A/B -> 2 keyframes` rather than migrating silently.
+
+Byte-exact round-trip verified separately for a 5-key curved path (all
+positions, targets, fovs, and the `smooth` flag).
+
+### Export — real render, not just a position sample
+
+A genuine 2s/24fps (48-frame) export with 5 keyframes sweeping around the
+capture, checked with the same `ffprobe signalstats` method NOTES already
+documents for the export pipeline: every one of the 48 frames' luma differs
+from its neighbour (no frozen frames — the failure mode a broken drive would
+produce), and the single largest frame-to-frame jump (5.4, vs a 0.43 mean)
+lands exactly at the authored camera repositioning near the capture's far
+side, not at a boundary that would indicate an export/drive bug. The curve is
+not literally monotonic end-to-end (the plan's own example path was never
+going to be — five keyframes circling a subject does not represent a
+brightness ramp), but *within* each inter-key segment it moves consistently in
+one direction, which is what "consistent with the path" actually means here.
+
+### What replaced Set A / Set B / Go A / Go B
+
+Removed entirely, along with the now-dead `key`/`grab`/`apply` state and the
+`vec()` preset helper that only ever serialised them. `driveCamera()` and the
+camDrive checkbox stay (Phase 5 turns `camDrive` into an explicit three-way
+mode — Manual / Keyframes / Orbit — this phase does not touch that shape,
+only what the "Keyframes" case now drives).
+
+---
+
 ## Model transform — Correct mode
 
 Position/rotation/scale on the loaded capture, so a scan that came out of

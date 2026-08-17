@@ -73,6 +73,27 @@
   .meter .bar i{display:block; height:100%; width:0%; background:var(--signal);
                 transition:width .05s linear}
   .meter output{color:var(--signal); font-variant-numeric:tabular-nums; text-align:right}
+  /* Camera keyframes get their own strip, always visible regardless of
+     which parameter is focused — "never confused with parameter keys" per
+     NOTES. Plain positioned divs, not a canvas: far simpler than extending
+     drawLane()'s per-parameter renderer for a row that has no Y-axis value
+     to plot, only a position on the timeline. */
+  #camRow{
+    position:relative; height:16px; flex:0 0 auto;
+    border-bottom:1px solid var(--rule); background:var(--chassis);
+  }
+  #camRowHint{
+    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    color:var(--rule); font-size:9px; letter-spacing:.08em; text-transform:uppercase;
+    pointer-events:none;
+  }
+  #camRowHint.hide{display:none}
+  .camtick{
+    position:absolute; top:3px; width:10px; height:10px; margin-left:-5px;
+    background:var(--edit); cursor:pointer; transform:rotate(45deg);
+    border:1px solid var(--chassis);
+  }
+  .camtick.onkey{background:var(--live)}
   #laneWrap{position:relative; flex:1; min-height:0}
   #laneCanvas{width:100%; height:100%; cursor:crosshair; touch-action:none}
   #laneHint{
@@ -292,6 +313,9 @@
     button, select{ padding:5px 9px }
     .chip{ padding:8px 12px }
     #palette{ bottom:calc(var(--dock) + var(--lane) + 44px) }
+    /* Reading and hitting ticks on a 390px-wide strip is not viable — drop
+       the row, keep Add key / Remove key working from the Shot section. */
+    #camRow{ display:none }
   }
 
 </style>
@@ -376,6 +400,9 @@
     </select>
     <label class="check"><input type="checkbox" id="maskInv" title="Invert the mask for this parameter only"> Inv</label>
   </div>
+  <div id="camRow" title="Camera keyframes — click a tick to jump there, alt-click to delete">
+    <div id="camRowHint">no camera keyframes</div>
+  </div>
   <div id="laneWrap">
     <canvas id="laneCanvas"></canvas>
     <div id="laneHint">click a parameter name to focus it</div>
@@ -397,16 +424,18 @@
   <details class="mod" data-group="camera" open>
     <summary>Shot <em>camera</em><i class="gflag"></i></summary>
     <div class="btns" style="margin-bottom:9px">
-      <button id="setA">Set A</button>
-      <button id="setB">Set B</button>
-      <button id="goA">Go A</button>
-      <button id="goB">Go B</button>
+      <button id="camAddKey" title="Add a camera keyframe at the current playhead">Add key</button>
+      <button id="camRemoveKey" title="Remove the camera keyframe at the current playhead">Remove key</button>
+      <button id="camSmooth" title="Path shape between keyframes" class="on">Smooth</button>
     </div>
-    <label class="check"><input type="checkbox" id="camDrive" checked> Timeline drives camera A→B</label>
+    <label class="check"><input type="checkbox" id="camDrive" checked> Timeline drives camera</label>
     <div class="row"><label>Ease</label><output id="o-ease">—</output>
       <input type="range" id="p-ease" min="0" max="1" step="0.01" value="0.8"></div>
     <div class="row"><label>Duration (s)</label><output id="o-dur">—</output>
       <input type="range" id="p-dur" min="1" max="30" step="0.5" value="8"></div>
+    <p style="color:var(--ink-dim); margin:8px 0 0" id="camKeyCount">
+      No camera keyframes — camera stays under manual orbit control.
+    </p>
   </details>
 
   <details class="mod" data-group="model">
@@ -1493,6 +1522,7 @@ function setPlayhead(t) {
   audMeters();
   audioSeek();
   drawLane();
+  drawCamRow();
 }
 
 function laneHead() {
@@ -1983,6 +2013,14 @@ async function loadSplat(source, label) {
     refreshModelUI();
     reframe();
 
+    /* Camera keyframes are captured positions in THIS capture's world space
+       — meaningless, possibly wildly out of frame, against a different one.
+       Same reasoning as the transform reset just above. */
+    CAMKEYS = [];
+    camSmooth = true;
+    rebuildCamCurves();
+    refreshCamUI();
+
     const n = splatCount(mesh).toLocaleString();
     $("t-splats").textContent = n;
     $("t-state").textContent = "idle";
@@ -2080,39 +2118,136 @@ addEventListener("drop", async (e) => {
 /* ------------------------------------------------------------------ *
  * Camera keyframes A / B
  * ------------------------------------------------------------------ */
-const key = { A: null, B: null };
-const grab = () => ({ pos: camera.position.clone(), tgt: controls.target.clone() });
-const apply = (k, at) => {
-  if (!k) return;
-  camera.position.copy(k.pos);
-  controls.target.copy(k.tgt);
-  controls.update();
-
-  /* driveCamera() runs every frame and rewrites the camera from `playhead`,
-     so with camDrive on it used to clobber this on the very next frame and
-     Go A / Go B looked dead. Move the playhead to the matching end of the
-     timeline instead, so the drive agrees with the button rather than
-     fighting it. Only meaningful once both keys exist. */
-  if ($("camDrive").checked && key.A && key.B) {
-    playhead = at;
-    $("scrub").value = at;
-    pushUniforms();
-    updateClock();
-  }
-};
-$("setA").onclick = () => { key.A = grab(); $("setA").classList.add("on"); };
-$("setB").onclick = () => { key.B = grab(); $("setB").classList.add("on"); };
-$("goA").onclick = () => apply(key.A, 0);
-$("goB").onclick = () => apply(key.B, 1);
+/* ------------------------------------------------------------------ *
+ * Camera keyframes — replaces the old fixed A/B pair with an ordered list,
+ * CAMKEYS = [{t, pos:[x,y,z], tgt:[x,y,z], fov}, ...], sorted by t.
+ *
+ * `t` lives in the same normalised 0..1 clip space as every parameter
+ * envelope, so rescaling Duration rescales the camera move exactly as it
+ * rescales everything else — no separate unit for the camera to track.
+ *
+ * fov is stored per key even though nothing currently animates it, because
+ * retrofitting it later means another preset migration for no reason: it
+ * costs nothing to carry now.
+ * ------------------------------------------------------------------ */
+let CAMKEYS = [];
+let camSmooth = true;                 // path shape: curved vs straight segments
+let camPosCurve = null, camTgtCurve = null;   // THREE.CatmullRomCurve3, rebuilt on any mutation
 
 const ease = (x, k) => (k <= 0 ? x : x * x * (3 - 2 * x) * k + x * (1 - k));
+
+function rebuildCamCurves() {
+  if (CAMKEYS.length < 3) { camPosCurve = camTgtCurve = null; return; }
+  camPosCurve = new THREE.CatmullRomCurve3(CAMKEYS.map((k) => new THREE.Vector3(...k.pos)));
+  camTgtCurve = new THREE.CatmullRomCurve3(CAMKEYS.map((k) => new THREE.Vector3(...k.tgt)));
+}
+
+const camKeyIndexAt = (t) => CAMKEYS.findIndex((k) => Math.abs(k.t - t) < KEY_EPS);
+
+function addCamKey() {
+  const rec = { t: playhead, pos: camera.position.toArray(), tgt: controls.target.toArray(), fov: camera.fov };
+  const i = camKeyIndexAt(playhead);
+  if (i >= 0) CAMKEYS[i] = rec; else CAMKEYS.push(rec);
+  CAMKEYS.sort((a, b) => a.t - b.t);
+  rebuildCamCurves();
+  refreshCamUI();
+  setStatus(`Camera key ${i >= 0 ? "replaced" : "added"} at t=${playhead.toFixed(2)} — ${CAMKEYS.length} total.`);
+}
+function removeCamKeyAtPlayhead() {
+  const i = camKeyIndexAt(playhead);
+  if (i < 0) { setStatus("No camera key at the playhead — scrub to one, or Add key instead.", true); return; }
+  CAMKEYS.splice(i, 1);
+  rebuildCamCurves();
+  refreshCamUI();
+  setStatus(`Camera key removed — ${CAMKEYS.length} left.`);
+}
+
+/* Position/target sampling at an arbitrary timeline position. `ease` (the
+   existing slider, unchanged meaning) now applies PER SEGMENT rather than
+   globally: it eases the LOCAL fraction within whichever pair of keys
+   `playheadT` currently falls between, not the whole clip at once. Path
+   SHAPE (straight vs curved) is the separate `camSmooth` toggle — Catmull-Rom
+   with exactly 2 points is mathematically linear anyway, but an explicit
+   linear branch for n<3 avoids relying on that degenerate case. */
+function sampleCam(playheadT) {
+  const n = CAMKEYS.length;
+  if (n === 0) return null;
+  if (n === 1) return { pos: [...CAMKEYS[0].pos], tgt: [...CAMKEYS[0].tgt], fov: CAMKEYS[0].fov };
+
+  let i = 0;
+  while (i < n - 2 && CAMKEYS[i + 1].t <= playheadT) i++;
+  const a = CAMKEYS[i], b = CAMKEYS[i + 1];
+  const span = Math.max(b.t - a.t, 1e-9);
+  const localRaw = Math.min(1, Math.max(0, (playheadT - a.t) / span));
+  const localU = ease(localRaw, V.ease);
+  const fov = a.fov + (b.fov - a.fov) * localU;
+
+  if (camSmooth && n >= 3 && camPosCurve) {
+    const curveU = (i + localU) / (n - 1);   // THREE parametrises curves uniformly by point INDEX, not by our `t`
+    return { pos: camPosCurve.getPoint(curveU).toArray(), tgt: camTgtCurve.getPoint(curveU).toArray(), fov };
+  }
+  const lerp3 = (p, q, u) => [p[0] + (q[0] - p[0]) * u, p[1] + (q[1] - p[1]) * u, p[2] + (q[2] - p[2]) * u];
+  return { pos: lerp3(a.pos, b.pos, localU), tgt: lerp3(a.tgt, b.tgt, localU), fov };
+}
+
 function driveCamera() {
-  if (!$("camDrive").checked || !key.A || !key.B) return;
-  const u = ease(playhead, V.ease);
-  camera.position.lerpVectors(key.A.pos, key.B.pos, u);
-  controls.target.lerpVectors(key.A.tgt, key.B.tgt, u);
+  if (!$("camDrive").checked || CAMKEYS.length === 0) return;
+  const s = sampleCam(playhead);
+  camera.position.set(...s.pos);
+  controls.target.set(...s.tgt);
+  if (s.fov !== camera.fov) { camera.fov = s.fov; camera.updateProjectionMatrix(); }
   camera.lookAt(controls.target);
 }
+
+/* Camera row — a strip of ticks independent of whichever parameter is
+   focused, so camera keys are never confused with a parameter's own
+   envelope keys drawn in the lane below. Plain positioned divs: there is no
+   Y-axis value to plot here, only a position on the timeline, so extending
+   drawLane()'s canvas renderer would be solving a harder problem than this
+   one actually is. */
+function drawCamRow() {
+  const row = $("camRow");
+  for (const el of row.querySelectorAll(".camtick")) el.remove();
+  $("camRowHint").classList.toggle("hide", CAMKEYS.length > 0);
+  const w = row.clientWidth || 1;
+  for (const k of CAMKEYS) {
+    const el = document.createElement("div");
+    el.className = "camtick" + (Math.abs(k.t - playhead) < KEY_EPS ? " onkey" : "");
+    el.style.left = (k.t * w) + "px";
+    el.title = `t=${k.t.toFixed(2)} — click to jump, alt-click to delete`;
+    el.addEventListener("click", (ev) => {
+      if (ev.altKey) {
+        const i = CAMKEYS.indexOf(k);
+        if (i >= 0) { CAMKEYS.splice(i, 1); rebuildCamCurves(); refreshCamUI(); setStatus(`Camera key removed — ${CAMKEYS.length} left.`); }
+        return;
+      }
+      setPlayhead(k.t);
+      camera.position.set(...k.pos);
+      controls.target.set(...k.tgt);
+      if (k.fov !== camera.fov) { camera.fov = k.fov; camera.updateProjectionMatrix(); }
+      camera.lookAt(controls.target);
+    });
+    row.appendChild(el);
+  }
+}
+
+function refreshCamUI() {
+  const n = CAMKEYS.length;
+  $("camKeyCount").textContent = n
+    ? `${n} camera keyframe${n === 1 ? "" : "s"}${n < 3 ? " — add a 3rd for a curved path" : ""}.`
+    : "No camera keyframes — camera stays under manual orbit control.";
+  drawCamRow();
+}
+$("camAddKey").onclick = addCamKey;
+$("camRemoveKey").onclick = removeCamKeyAtPlayhead;
+$("camSmooth").onclick = () => {
+  camSmooth = !camSmooth;
+  $("camSmooth").textContent = camSmooth ? "Smooth" : "Linear";
+  $("camSmooth").classList.toggle("on", camSmooth);
+  pushUniforms();
+};
+addEventListener("resize", drawCamRow);
+refreshCamUI();
 
 /* ------------------------------------------------------------------ *
  * Transport + live loop
@@ -2140,6 +2275,7 @@ function frame(now) {
     pushUniforms();
     updateClock();
     syncSliders();
+    drawCamRow();
     audMeters();
     drawLane();
   }
@@ -2287,7 +2423,7 @@ $("render").onclick = async () => {
  * as the small shareable text files they are meant to be.
  * ------------------------------------------------------------------ */
 const PRESET_FORMAT = "splat-bench-preset";
-const PRESET_VERSION = 4;   // v2 selects; v3 audio; v4 regions+mask, folded Reveal in
+const PRESET_VERSION = 5;   // v2 selects; v3 audio; v4 regions+mask; v5 camera keyframes
 /* `mobileMode` is deliberately absent: it is a property of the device you are
    sitting at, not of the look. A preset saved on a desktop must not force a
    phone back to full pixel ratio, nor the reverse. */
@@ -2296,7 +2432,6 @@ const SELECTS = ["res", "fps"];
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 function serialize() {
-  const vec = (k) => (k ? { pos: k.pos.toArray(), tgt: k.tgt.toArray() } : null);
   const envs = {};
   for (const [id, e] of Object.entries(ENV)) {
     if (!e.keys.length) continue;                 // don't persist empty envelopes
@@ -2315,7 +2450,10 @@ function serialize() {
     toggles: Object.fromEntries(TOGGLES.map((id) => [id, $(id).checked])),
     selects: Object.fromEntries(SELECTS.map((id) => [id, $(id).value])),
     output: { res: $("res").value, fps: $("fps").value },   // kept for v1 readers
-    camera: { A: vec(key.A), B: vec(key.B) },
+    camera: {
+      keys: CAMKEYS.map((k) => ({ t: +k.t.toFixed(6), pos: k.pos, tgt: k.tgt, fov: k.fov })),
+      smooth: camSmooth,
+    },
     envelopes: envs,
     /* Property of the capture, not the workspace — unlike Mobile profile,
        this belongs in the file. Presets reference the asset by name only, so
@@ -2496,15 +2634,43 @@ function applyPreset(o) {
 
   refreshRegionUI();
 
-  const vec3 = (a) => new THREE.Vector3().fromArray(a);
-  const restore = (c) =>
-    c && Array.isArray(c.pos) && Array.isArray(c.tgt)
-      ? { pos: vec3(c.pos), tgt: vec3(c.tgt) }
-      : null;
-  key.A = restore(o.camera?.A);
-  key.B = restore(o.camera?.B);
-  $("setA").classList.toggle("on", !!key.A);
-  $("setB").classList.toggle("on", !!key.B);
+  /* Camera keyframes (v5). A preset with no camera data at all leaves the
+     camera on manual orbit control — additive, load-forgiving, matches every
+     other "absent means default" rule in this function. A v4-or-earlier
+     preset's old {A, B} pair migrates to two keys at t=0/t=1: exactly what
+     driveCamera() did with them before this phase existed, so an old preset
+     reproduces its original camera move unchanged. fov defaults to the
+     camera's own construction-time value (50) since A/B never stored one. */
+  const isVec3 = (v) => Array.isArray(v) && v.length === 3 && v.every(Number.isFinite);
+  if (Array.isArray(o.camera?.keys)) {
+    CAMKEYS = o.camera.keys
+      .filter((k) => Number.isFinite(k?.t) && isVec3(k?.pos) && isVec3(k?.tgt))
+      .map((k) => ({
+        t: clamp(k.t, 0, 1),
+        pos: k.pos.map(Number),
+        tgt: k.tgt.map(Number),
+        fov: Number.isFinite(k.fov) ? clamp(k.fov, 10, 120) : 50,
+      }))
+      .sort((a, b) => a.t - b.t);
+    camSmooth = o.camera.smooth !== false;
+  } else if (o.camera?.A || o.camera?.B) {
+    CAMKEYS = [];
+    if (isVec3(o.camera.A?.pos) && isVec3(o.camera.A?.tgt)) {
+      CAMKEYS.push({ t: 0, pos: o.camera.A.pos.map(Number), tgt: o.camera.A.tgt.map(Number), fov: 50 });
+    }
+    if (isVec3(o.camera.B?.pos) && isVec3(o.camera.B?.tgt)) {
+      CAMKEYS.push({ t: 1, pos: o.camera.B.pos.map(Number), tgt: o.camera.B.tgt.map(Number), fov: 50 });
+    }
+    camSmooth = true;
+    if (CAMKEYS.length) applyPreset.migrationNotes.push(`camera A/B -> ${CAMKEYS.length} keyframe${CAMKEYS.length === 1 ? "" : "s"}`);
+  } else {
+    CAMKEYS = [];
+    camSmooth = true;
+  }
+  rebuildCamCurves();
+  $("camSmooth").textContent = camSmooth ? "Smooth" : "Linear";
+  $("camSmooth").classList.toggle("on", camSmooth);
+  refreshCamUI();
 
   /* Additive, no version bump: a preset with no transform block takes
      XFORM_DEFAULT, which reproduces the pre-Phase-2 hardcoded Y-flip
@@ -2834,6 +3000,11 @@ if (new URLSearchParams(location.search).has("debug")) {
     get correcting(){ return correcting; },
     get radius(){ return radius; },
     get bounds(){ return bounds; },
+    get CAMKEYS(){ return CAMKEYS; },
+    get camSmooth(){ return camSmooth; },
+    sampleCam,
+    addCamKey,
+    removeCamKeyAtPlayhead,
     xctl,
     pushUniforms,
     draw() {
