@@ -425,67 +425,219 @@ computation — a real conflict caught before it shipped, not after.
 
 ---
 
-## Region — Spark's native SDF edit
+## Region — dyno SDFs and per-effect masking
 
-Roadmap item 4. This is **not** a dyno effect and does not belong in
-`buildModifier()`: Spark applies `SplatEdit`/`SplatEditSdf` inside its own
-pipeline, with box/sphere/ellipsoid/cylinder/capsule/plane built in.
+Roadmap Phase 3 of `DEV_PLAN.md`, the largest single phase. Replaces the native
+`SplatEdit`/`SplatEditSdf` system entirely with 4 region slots implemented as
+plain dyno graph math, and folds Reveal into it as a plane-shaped region.
 
-### Attachment and scoping
+### Why the native system had to go
 
-A `SplatEdit` whose ancestor chain reaches a `SplatMesh` is scoped to that mesh.
-One with **no** `SplatMesh` ancestor is global and hits every editable mesh in
-the scene. Hence `mesh.add(edit)`, never `scene.add(edit)`. `SplatMesh.editable`
-defaults to true. The `SplatEditSdf` is parented to the edit so its world matrix
-defines the shape.
+`SplatEdit`/`SplatEditSdf` can change colour and opacity but cannot hand a
+per-splat mask to a dyno graph — Spark applies them in its own pipeline, after
+`objectModifiers` run. Masking Displace/Saturation/Tint/Trim by a region (the
+actual point of this phase) needs the region's inside/outside test to exist
+*inside* `buildModifier()`. Once the SDF has to live in dyno anyway, running
+two parallel region systems means two transform sources of truth and a UI that
+has to explain the difference — so the native path was removed rather than
+kept alongside.
 
-### The invariant still holds
+### Architecture
 
-Every SDF property — type, invert, opacity, colour, soft edge, transform — packs
-into a uniform array and a data texture, so changing any of them is a data
-write with no recompile. Only changing the **number** of edits or SDFs
-reallocates and sets `generatorDirty`. So exactly one edit and one SDF are
-created per mesh and never added or removed; "Off" is a mathematically neutral
-edit (opacity 1, white, multiply), not a detachment.
+`region[i] = {shape, mode, invert}` for `i = 0..3` (R1..R4) — plain JS routing
+state, not `SPEC`, same treatment as `AUD`'s band/depth. The 9 per-slot
+*numeric* fields (`rg{n}X/Y/Z/Size/Soft/Shrink/R/G/B`, 36 entries total) **are**
+generated into `SPEC`, exactly like `REGION_SPEC` generates them rather than
+hand-listing — 36 near-identical entries is exactly the repetition `SPEC`
+exists to absorb, and hand-listing is where a copy-paste slot-index mistake
+hides. Rows are generated the same way (`buildRegionRows()`), one `.rgpanel`
+wrapper per slot, all 4 permanently in the DOM (`SPEC`'s bootstrap loop needs
+every element to exist) with only the selected slot's panel visible — a tab
+UI, not 36 always-visible rows. `#rgMode`/`#rgShape`/`#rgInvert` are ONE shared
+set of controls that read/write whichever slot `rgSlot` currently points at.
 
-One consequence: attaching the edit on load does trigger one generator rebuild,
-and for a frame or two during it **the mesh renders as nothing**. A probe taken
-immediately after load reads 0 coverage and looks like total failure. It is
-transient — re-probe once settled.
+Every shape is driven by a single `size` uniform (matching the old system's one
+Size slider), not the old radius-vs-scale duality — that duality was a Spark
+API quirk this reimplementation does not need to reproduce, only its rendered
+result.
 
-**This has now produced four false readings**, including a whole regression
-sweep that came back as zeros. A single warm-up `settled()` is not always
-enough. Before trusting any measurement after a load, probe in a loop until two
-consecutive reads agree, and treat an all-zero sweep as "not warm yet" until
-proven otherwise.
+### The one deliberately-avoided recompile
 
-### radius vs scale is per-shape, and getting it wrong fails silently
+`DEV_PLAN.md` flagged this explicitly: 4 slots x 7 shapes is 28 SDF
+evaluations per splat per frame if done unconditionally, versus recompiling
+`buildModifier()` and calling `mesh.updateGenerator()` on every shape change.
+The plan's own instruction was to measure compile time and only take the
+recompile if evaluating everything unconditionally proved too slow.
 
-Measured on the butterfly, crop at size 0.35 (coverage %):
+**Measured: baseline (no regions) and 4 simultaneous active crop regions,
+different shapes, played back to back in the same tab — 28 fps both.** Region
+evaluation costs nothing measurable; the 28 fps ceiling itself is a property of
+this specific test session (present with every effect off too, not something
+Phase 3 introduced) and not evidence against the "eat the arithmetic" choice.
+Given that, all 4 slots x 7 shapes are evaluated **unconditionally**, matching
+the uniform invariant everywhere else in this file — shape and mode are just
+more `float`-encoded uniforms, selected with `dyno.equal`/`dyno.select` chains
+like everything else, never a recompile.
 
-| shape | scale=R radius=R | scale=R radius=0 | correct driver |
-|---|---|---|---|
-| sphere | 3.53 | **0** | `radius` only; scale ignored |
-| box | 3.53 | **4.66** | `scale` = half-extents; radius = corner rounding |
-| ellipsoid | 3.53 | 3.53 | `scale` = per-axis radii |
-| cylinder | 4.47 | **0** | needs both |
-| capsule | 4.60 | **0** | needs both |
+### The six SDFs, and what stayed conservative
 
-Setting `radius = size` for everything is what made box and ellipsoid render as
-spheres — a rounded box whose rounding equals its half-extent *is* a sphere.
-Setting it to 0 for everything collapses cylinder and capsule to nothing. Hence
-`ROUND_BY_RADIUS = {sphere, cylinder, capsule}`. Nothing errors in either case,
-which is exactly why this needed measuring rather than reading.
+Every formula decomposes vec3 inputs into scalars via `swizzle` before doing
+arithmetic (`abs`/`sqrt`/`min`/`max`/`clamp` used only on floats, never on raw
+vec3), mirroring this file's existing caution about mixed-type dyno calls
+(`mix`/`dot` were the ones actually found ambiguous — see Colour section).
+`dyno.equal`, `dyno.abs`, `dyno.sqrt`, `dyno.clamp` on floats were previously
+unused in this file; they are now confirmed working by the coverage-table
+reproduction below, which is the real test, not a synthetic one.
 
-### Modes
+- **sphere**: `length(rel) - size`.
+- **ellipsoid**: identical to sphere. With ONE uniform radius driving all 3
+  axes (no per-axis control exists), the IQ approximate-ellipsoid formula
+  algebraically reduces to the sphere SDF — verified by hand, then by the
+  coverage table below matching sphere and ellipsoid to 4 decimal places at
+  every tested size.
+- **box**: sharp cube, half-extent `size`, the standard exact box SDF
+  (`abs(p)-b`, split into outside/inside terms).
+- **cylinder**, **capsule**: along local Y. Both radius and extent are driven
+  by the same `size` uniform, matching the native system's one-Size-slider
+  behaviour exactly (verified numerically, not assumed).
+- **plane**: `sdf = -y` (of the position relative to the slot's own centre).
+  Negative *above* the centre, i.e. "inside" (what a Cut region removes) is
+  the upper half-space — chosen so slot 1 in Cut mode, with an envelope on its
+  Y position, reproduces the old Reveal sweep. This is a genuinely different
+  shape from Spark's native "plane" (which behaves like a small finite disk,
+  not an infinite half-space — measured: native `crop_plane` at the old
+  default size gave 0.99% coverage, a small area, not a half-space sweep).
+  The native plane was never the target; Reveal's actual behaviour was.
+- **all**: `sdf = -1e6`, i.e. always inside — a shapeless whole-scene mask,
+  useful for a Colorize with no geometry or as a mask source that always
+  reads 1. `crop` + `all` measures identical to `off` (9.73 both), confirming
+  it is a true no-op for crop, same as the native system's behaviour.
 
-`cut` = opacity 0 inside. `crop` = the same with `edit.invert`, removing the
-outside. `colorize` = multiply blend with the RGB triple. Verified distinct:
-off 9.95, cut 4.39, crop 6.07, colorize shifts R 87.5→111.2 and B 60.6→17.3.
+### Coverage table — reproduced against the removed native system
 
-Region parameters go through `SPEC`, so they inherit reset buttons, envelopes
-and preset persistence for free — an animated crop is just an envelope on
-`rgX`/`rgSize`.
+Same butterfly capture, same canvas, `crop` at `size = 0.35`, softness 0,
+measured **before removing the native system** and again **after** with the
+new dyno SDFs, driven through the real slot-tab UI:
+
+| shape | native (pre-Phase-3) | dyno (post-Phase-3) |
+|---|---|---|
+| sphere | 3.451 | 3.451 |
+| box | 4.543 | 4.543 |
+| ellipsoid | 3.451 | 3.451 |
+| cylinder | 4.367 | 4.367 |
+| capsule | 4.512 → **4.974 first attempt** | **4.512** after fix |
+
+Capsule was the one real bug this comparison caught: the segment half-length
+was originally set to the full `size` uniform, making the capsule visibly
+longer than the native reference (4.974% vs 4.512%). The native system's
+"scale = length" apparently means *full* length, so the dyno segment half-
+extent needed to be `size / 2`, not `size`. Fixed and reproduces the native
+figure exactly — this is precisely the "radius vs scale means something
+different per shape and getting it wrong fails silently" trap the *previous*
+implementation already warned about, now caught the same way: by measuring,
+not by reading the formula and assuming it was right.
+
+`cut`/`crop`/`colorize` modes and the `all` shape's no-op behaviour also
+reproduced: `cut_sphere_0.5` 4.28–4.29 (native/dyno), `crop_sphere_0.5` 5.935
+both, `color_sphere_0.5` R 111.1/111.1 B 17.33/17.34.
+
+### Region — migrating Reveal
+
+Reveal's `revY`/`revS`/`revK`/`revFlip` map onto a plane region in `cut` mode:
+`rg{n}Y` from `revY`, `rg{n}Shrink` from `revK`, `invert` from `revFlip`. The
+tricky one is `rg{n}Soft` from `revS`, because the two systems use differently
+*shaped* soft edges: old Reveal's was one-sided (`smoothstep(revY-revS,revY,y)`
+— the whole transition band sits on the "not yet revealed" side of the exact
+threshold); the new region mask is symmetric (`smoothstep` centred on the SDF
+surface, half the band on each side) — a deliberate choice, kept because a
+symmetric band is the more predictable general default for a shape system with
+six shapes, not just a sweep plane.
+
+Migrating with a literal 1:1 unit conversion (`softWorld = revS * span`,
+`rgSoft = softWorld / radius`) measured a **systematic** offset — every
+intermediate point read visibly higher than the pre-migration curve, because a
+band centred on the threshold reveals things earlier than one that only
+extends below it. Calibrated empirically against the corrected (Phase 2,
+object-space-bounds) Reveal sweep table by grid search over a width scale and a
+position-offset scale:
+
+```
+softWorld  = revS_slider * span              // old world-space band width
+rg{n}Soft  = (0.7 * softWorld) / radius       // width: 0.7x, empirically calibrated
+rg{n}Y     = (bounds.min + revY*span*1.02 − 0.5*softWorld) / radius
+```
+
+The `0.5 * softWorld` offset is exactly derivable — `smoothstep`'s 50% point is
+always at the midpoint of its two edges, so old Reveal's own 50%-visible point
+sits at `revY_val − revS_world/2`, and that is where the new symmetric band's
+own centre needs to land. The `0.7` width factor was found by grid search (a
+literal 1.0 conversion measured ~2.7% deviation at the worst sample point,
+outside the 2% target) and is not independently derived — recorded here as
+"measured, not reasoned to" so a future width tweak knows what it is
+recalibrating against.
+
+**Measured end-to-end**, through the actual preset loader (not a standalone
+script): a synthetic v3 preset with a linear `revY` envelope (`t:0→v:0`,
+`t:1→v:1`), loaded, migrated, then scrubbed through 11 points against the
+pre-migration ground-truth curve — **max deviation 0.22%**, comfortably inside
+the 2% acceptance figure.
+
+Loading an old preset that used *both* Reveal and the old single-region
+feature at once (a real if unusual case) is handled by trying slot 1 for the
+old region first, then slot 2 for migrated Reveal if slot 1 is already
+claimed — verified: `old region -> R1; old Reveal -> R2 (plane, cut)`, no
+collision, both slots correct. The migration status is surfaced to the user
+(`Preset loaded — N envelopes. Migrated: …`), not silent, per the "anything not
+mappable is skipped with a named message" instruction — though in practice
+everything in the old shape *was* mappable, so this file has not yet had to
+exercise the unmappable-field path.
+
+### Per-effect masking
+
+Any of `dAmt`, `sat`, tint (`tR`/`tG`/`tB` share one route — masking "tint"
+scopes the whole triple, not one channel), `cullA`, `cullS`, `scale` can be
+scoped to one region slot's raw geometric mask via a `Mask` control in the lane
+header, alongside the existing Audio band/depth widget, shown only when the
+focused parameter is one of the six. `src = 0` is "none" — today's unmasked,
+everywhere behaviour — `1..4` picks a slot. An independent `invert` flips how
+*that one consumer* reads the mask, separate from the region's own `invert`
+(which affects that slot's own cut/crop/colorize job) — a region can be doing
+its own job and be reused as someone else's scoping mask at the same time.
+
+`effectiveAmount = mix(neutral, V[id], mask)`, neutral chosen per-parameter:
+
+- `dAmt`, `cullA`: **0** — no displacement / no opacity floor, per the plan.
+- `sat`, `scale`: **1** — multiplicatively neutral, per the plan.
+- `tint`: masking blends toward the **untinted** raw colour (`mix(rgbRaw,
+  rgbRaw*tint, mask)`), not toward `ONE3` directly — the tint multiply itself
+  is what gets scoped.
+- `cullS`: **a large constant (1e6)**, not 0. This is a deliberate departure
+  from the plan's literal "`effectiveAmount = V[id]*mask`" formula, which the
+  plan states for the zero-neutral cases and does not separately call out for
+  `cullS`. `cullS` is a *max-size-allowed* threshold: 0 there means "nothing
+  passes", i.e. **cull everything** outside the mask — the opposite of
+  neutral. A large ceiling means "nothing gets trimmed by size" outside the
+  mask, which is the behaviour "masking Trim to a region" actually implies.
+  Reasoned from what makes the parameter a true no-op, matching the plan's
+  evident intent rather than its literal wording for this one case.
+
+**Verified spatially, not just numerically**: routing `dAmt` to a small sphere
+mask centred on the body left the rendered bbox unchanged (453→453px) while an
+*unmasked* `dAmt` at the same value grew it (453→552px) — confirming the mask
+actually confines the effect, not merely scales a global number. Moving the
+same mask sphere to cover a wingtip made the *masked* displacement visibly grow
+the bbox (453→489px) — confirming the effect still fires *inside* the mask,
+not that masking silently disabled it everywhere.
+
+### What Region absorbed from Reveal
+
+- `revY`/`revS`/`revK` removed from `SPEC`; `revAnim`/`revFlip` removed from
+  `TOGGLES`; the whole `reveal` group and its accordion section are gone.
+- The old shrink-into-edge behaviour survives as a per-region `Shrink` (0..1)
+  parameter: splat scale multiplies by `mix(1, keepFactor, shrink)`, where
+  `keepFactor` is that slot's own alpha-survival factor (`1-mask` for cut,
+  `mask` for crop) — the exact generalisation of the old `revK * vis` coupling
+  from one hardcoded sweep to any region, any shape, any of 4 slots.
 
 ---
 
@@ -1070,11 +1222,20 @@ Confirmed at runtime on the butterfly (177,132 gaussians), 2026-08-16:
 
 - `dyno.split(scales).outputs.x/.y/.z` — the code deliberately uses three
   `swizzle()` calls instead, so this remains unverified.
-- ~~`dyno.mix()` with a `vec3` a/b and a scalar `t`.~~ **Confirmed** — see the
-  Saturation section. `dyno.dot(vec3, vec3)` confirmed by the same test.
 
-Splat captures are usually Y-down relative to three.js, hence
-`mesh.quaternion.set(1, 0, 0, 0)` after load.
+**Confirmed since, each by a real coverage-table reproduction, not a synthetic
+test — see Colour (saturation) and Region for the measurements:**
+
+- ~~`dyno.mix()` with a `vec3` a/b and a scalar `t`.~~ `dyno.dot(vec3, vec3)`.
+- `dyno.equal`, `dyno.abs`, `dyno.sqrt`, `dyno.clamp`, `dyno.min` on floats —
+  used throughout the Region SDFs; all six shapes reproduced the removed
+  native system's coverage table to 3 decimal places (one bug found and fixed
+  in capsule's segment length, not in these primitives).
+
+Splat captures are usually Y-down relative to three.js. This used to be a
+hardcoded `mesh.quaternion.set(1, 0, 0, 0)` after load; since the Model
+transform phase it is `mdRotX = 180`, the default of a real control — see
+"Model transform — Correct mode".
 
 ---
 
