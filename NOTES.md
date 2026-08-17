@@ -585,6 +585,78 @@ behind `?debug=1`.
 
 ---
 
+## Section accordion and `SPEC` groups
+
+`SPEC` entries are `[id, digits, group]`. The group ties a parameter to its rail
+section, so resets, envelopes, audio routing and preset persistence all stay
+driven by `SPEC` as it grows — the dev plan takes it from 26 parameters to
+roughly 60, and retrofitting grouping around that would be far worse.
+
+Sections are native `<details>`/`<summary>`: keyboard accessible for free, works
+inside the mobile bottom sheet, and no open/closed state machine to own beyond
+persisting it.
+
+`reveal` is a group on borrowed time — Phase 3 of the dev plan folds it into
+`region` — but it has to exist while its parameters do.
+
+### Summary markers
+
+A collapsed group must never hide that something inside it is animating. The
+summary carries, in `--edit` violet:
+
+- a **count** when any parameter in the group has an armed envelope or an audio
+  route,
+- a **·** when nothing is driven but something is off its default,
+- nothing when the whole group is at default.
+
+This mirrors the per-row `.dirty` convention so the rail reads the same
+collapsed or expanded. Note that a reset-all clears the dots but keeps the
+counts — resetting a slider does not disarm an envelope, and pretending
+otherwise would be a lie about what is driving the render.
+
+`refreshGroups()` is called from `refreshEnv()` — the single choke point every
+envelope mutation already routes through — plus the slider input listener,
+audio routing changes and preset load. It is deliberately **not** called from
+`markDirty()`: `syncSliders()` calls that per driven parameter on every frame
+during playback, and `refreshGroups()` walks all of `SPEC`.
+
+### Open/closed state is in localStorage, not presets
+
+Same reasoning as `Mobile profile`: it describes your workspace, not the look.
+Key `splatbench.accordion.v1`. Nothing is written until you actually toggle
+something, so a first visit gets the defaults: `camera` and `output` open.
+
+### Measured
+
+| | |
+|---|---|
+| rail content, all collapsed | 466px (fits a 900px viewport) |
+| rail content, defaults open | 882px |
+| rail content, all open | 2608px |
+| summary row height | 41px desktop and mobile |
+| mobile 390×844 | stage 692 + lane 96 + transport 56 = 844, no overflow |
+
+### A note on comparing coverage across sessions
+
+The Phase 0 regression initially looked like a uniform ~2% drop against every
+figure in this file. It was not a regression: the browser window was a
+different size, so the canvas was 1310×782 rather than the 1460×891 the
+baselines were taken at, and **coverage is a percentage of canvas area**.
+
+Colour channels were unchanged, which was the clue. The size-independent check
+is the ratio of each case to its own BASE, which cancels canvas geometry — those
+matched the recorded figures to within 0.003. **Record the canvas size next to
+any coverage figure, or compare ratios.**
+
+### Warm-up: "stable" is not enough, it must be stable AND non-zero
+
+The documented warm-up rule — probe until two consecutive reads agree — is not
+sufficient on its own. Two consecutive **zeros** agree, and zero is exactly the
+not-yet-warm signature. The rule is: two consecutive agreeing reads that are
+also non-zero, with a cap.
+
+---
+
 ## Gesture mode — direct manipulation
 
 On a phone the rail covers the subject, so adjusting a slider means not seeing

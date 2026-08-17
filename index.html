@@ -163,13 +163,28 @@
   #drop p{margin:0; color:var(--ink-dim); max-width:44ch; letter-spacing:.02em}
   body.dragging #stage{outline:1px solid var(--signal); outline-offset:-9px}
 
-  .mod{border-bottom:1px solid var(--rule); padding:14px 16px 16px}
-  .mod > h2{
-    margin:0 0 12px; font-size:10px; font-weight:400;
-    letter-spacing:.24em; text-transform:uppercase; color:var(--ink-dim);
-    display:flex; justify-content:space-between; align-items:baseline;
+  /* Native <details> rather than a custom widget: keyboard accessible for
+     free, works inside the mobile bottom sheet, and there is no open/closed
+     state machine to own beyond persisting it. */
+  .mod{border-bottom:1px solid var(--rule); padding:0 16px}
+  .mod[open]{padding-bottom:16px}
+  .mod > summary{
+    margin:0 -16px; padding:13px 16px; cursor:pointer; list-style:none;
+    font-size:10px; letter-spacing:.24em; text-transform:uppercase;
+    color:var(--ink-dim); display:flex; align-items:baseline; gap:9px;
   }
-  .mod > h2 em{font-style:normal; color:var(--rule)}
+  .mod > summary::-webkit-details-marker{display:none}
+  .mod > summary::before{content:"+"; color:var(--rule); width:8px}
+  .mod[open] > summary::before{content:"\2212"}
+  .mod > summary:hover{color:var(--ink)}
+  .mod > summary:focus-visible{outline:1px solid var(--signal); outline-offset:-2px}
+  .mod > summary em{font-style:normal; color:var(--rule); flex:1; text-align:right}
+  /* A collapsed group must never hide that something inside it is driven. */
+  .gflag{
+    font-style:normal; min-width:11px; text-align:center; letter-spacing:0;
+    color:transparent; font-size:10px;
+  }
+  .gflag.on{color:var(--edit)}
 
   .row{display:grid; grid-template-columns:1fr auto auto 54px; gap:8px; align-items:center; margin-bottom:7px}
   .row label.focusable{cursor:pointer}
@@ -350,8 +365,8 @@
        after boot, the module died during evaluation — check the console. -->
   <div id="status">Booting…</div>
 
-  <section class="mod">
-    <h2>Shot <em>camera</em></h2>
+  <details class="mod" data-group="camera" open>
+    <summary>Shot <em>camera</em><i class="gflag"></i></summary>
     <div class="btns" style="margin-bottom:9px">
       <button id="setA">Set A</button>
       <button id="setB">Set B</button>
@@ -363,20 +378,20 @@
       <input type="range" id="p-ease" min="0" max="1" step="0.01" value="0.8"></div>
     <div class="row"><label>Duration (s)</label><output id="o-dur">—</output>
       <input type="range" id="p-dur" min="1" max="30" step="0.5" value="8"></div>
-  </section>
+  </details>
 
-  <section class="mod">
-    <h2>Trim <em>per-splat cull</em></h2>
+  <details class="mod" data-group="trim">
+    <summary>Trim <em>per-splat cull</em><i class="gflag"></i></summary>
     <div class="row"><label>Min opacity</label><output id="o-cullA">—</output>
       <input type="range" id="p-cullA" min="0" max="1" step="0.005" value="0"></div>
     <div class="row"><label>Max splat size</label><output id="o-cullS">—</output>
       <input type="range" id="p-cullS" min="0" max="1" step="0.002" value="1"></div>
     <div class="row"><label>Size × all</label><output id="o-scale">—</output>
       <input type="range" id="p-scale" min="0.05" max="3" step="0.01" value="1"></div>
-  </section>
+  </details>
 
-  <section class="mod">
-    <h2>Region <em>sdf edit</em></h2>
+  <details class="mod" data-group="region">
+    <summary>Region <em>sdf edit</em><i class="gflag"></i></summary>
     <div class="btns" style="margin-bottom:9px">
       <select id="rgMode" title="What the region does to the splats inside it">
         <option value="off" selected>Off</option>
@@ -414,10 +429,10 @@
       Spark's native SDF edit, not a dyno effect. Centre and size are in units of scene
       radius. Colorize only applies in Colorize mode.
     </p>
-  </section>
+  </details>
 
-  <section class="mod">
-    <h2>Reveal <em>sweep plane</em></h2>
+  <details class="mod" data-group="reveal">
+    <summary>Reveal <em>sweep plane</em><i class="gflag"></i></summary>
     <div class="row"><label>Plane height</label><output id="o-revY">—</output>
       <input type="range" id="p-revY" min="0" max="1" step="0.002" value="1"></div>
     <div class="row"><label>Softness</label><output id="o-revS">—</output>
@@ -426,10 +441,10 @@
       <input type="range" id="p-revK" min="0" max="1" step="0.01" value="0.7"></div>
     <label class="check"><input type="checkbox" id="revAnim"> Timeline sweeps the plane</label>
     <label class="check"><input type="checkbox" id="revFlip"> Invert (reveal downward)</label>
-  </section>
+  </details>
 
-  <section class="mod">
-    <h2>Displace <em>noise field</em></h2>
+  <details class="mod" data-group="displace">
+    <summary>Displace <em>noise field</em><i class="gflag"></i></summary>
     <div class="row"><label>Amount</label><output id="o-dAmt">—</output>
       <input type="range" id="p-dAmt" min="0" max="0.5" step="0.001" value="0"></div>
     <div class="row"><label>Frequency</label><output id="o-dFrq">—</output>
@@ -438,20 +453,20 @@
       <input type="range" id="p-dSpd" min="0" max="3" step="0.01" value="0.3"></div>
     <div class="row"><label>Per-splat scatter</label><output id="o-dRnd">—</output>
       <input type="range" id="p-dRnd" min="0" max="1" step="0.01" value="1"></div>
-  </section>
+  </details>
 
-  <section class="mod">
-    <h2>Tint <em>rgb multiply</em></h2>
+  <details class="mod" data-group="colour">
+    <summary>Tint <em>rgb multiply</em><i class="gflag"></i></summary>
     <div class="row"><label>R</label><output id="o-tR">—</output>
       <input type="range" id="p-tR" min="0" max="2" step="0.01" value="1"></div>
     <div class="row"><label>G</label><output id="o-tG">—</output>
       <input type="range" id="p-tG" min="0" max="2" step="0.01" value="1"></div>
     <div class="row"><label>B</label><output id="o-tB">—</output>
       <input type="range" id="p-tB" min="0" max="2" step="0.01" value="1"></div>
-  </section>
+  </details>
 
-  <section class="mod">
-    <h2>Output <em>webcodecs</em></h2>
+  <details class="mod" data-group="output" open>
+    <summary>Output <em>webcodecs</em><i class="gflag"></i></summary>
     <div class="btns" style="margin-bottom:9px">
       <select id="res">
         <option value="1280x720">1280 × 720</option>
@@ -475,10 +490,10 @@
       at 0. It is an extra manual wait kept only as an escape hatch if a capture ever
       still shows wrong-order blending that the live view doesn't.
     </p>
-  </section>
+  </details>
 
-  <section class="mod">
-    <h2>Audio <em>fft drive</em></h2>
+  <details class="mod" data-group="audio">
+    <summary>Audio <em>fft drive</em><i class="gflag"></i></summary>
     <div class="btns" style="margin-bottom:9px">
       <button id="audLoad">Load audio</button>
       <button id="audMute" disabled>Mute</button>
@@ -493,10 +508,10 @@
       and export all read the same values. Click a parameter's <em>name</em> to focus it,
       then pick a band in the lane below. Audio adds on top of any envelope.
     </p>
-  </section>
+  </details>
 
-  <section class="mod">
-    <h2>Preset <em>json</em></h2>
+  <details class="mod" data-group="preset">
+    <summary>Preset <em>json</em><i class="gflag"></i></summary>
     <div class="btns">
       <button id="savePreset">Save JSON</button>
       <button id="loadPreset">Load JSON</button>
@@ -505,16 +520,16 @@
       Saves every parameter, envelope, toggle and camera key — everything except the
       splat itself, which is referenced by name only. Drop a .json on the viewport to load.
     </p>
-  </section>
+  </details>
 
-  <section class="mod">
-    <h2>Viewport</h2>
+  <details class="mod" data-group="viewport">
+    <summary>Viewport<i class="gflag"></i></summary>
     <div class="row"><label>Pixel ratio</label><output id="o-dpr">—</output>
       <input type="range" id="p-dpr" min="0.5" max="2" step="0.05" value="1"></div>
     <label class="check"><input type="checkbox" id="useLod"> Level of detail on next load (large scans)</label>
     <label class="check"><input type="checkbox" id="mobileMode"> Mobile profile (caps pixel ratio, forces LOD)</label>
     <div class="btns"><button id="reframe">Reframe</button><button id="reload">Load another</button></div>
-  </section>
+  </details>
 </aside>
 
 <input type="file" id="file" accept=".ply,.spz,.splat,.ksplat,.sog,.zip,.rad" hidden>
@@ -721,15 +736,21 @@ function buildModifier() {
  * Parameters — two passes, so no handler ever runs against a
  * half-populated P.
  * ------------------------------------------------------------------ */
+/* [id, decimal places, group]. The group ties a parameter to its accordion
+   section, so reset/envelope/audio/preset wiring all stay driven by SPEC as it
+   grows. `reveal` is a group on borrowed time — Phase 3 folds it into
+   `region` — but it needs to exist while its parameters do. */
 const SPEC = [
-  ["ease", 2], ["dur", 1],
-  ["cullA", 2], ["cullS", 4], ["scale", 2],
-  ["rgX", 2], ["rgY", 2], ["rgZ", 2], ["rgSize", 2], ["rgSoft", 3],
-  ["rgR", 2], ["rgG", 2], ["rgB", 2],
-  ["revY", 3], ["revS", 3], ["revK", 2],
-  ["dAmt", 3], ["dFrq", 2], ["dSpd", 2], ["dRnd", 2],
-  ["tR", 2], ["tG", 2], ["tB", 2],
-  ["br", 0], ["settle", 0], ["dpr", 2],
+  ["ease", 2, "camera"], ["dur", 1, "camera"],
+  ["cullA", 2, "trim"], ["cullS", 4, "trim"], ["scale", 2, "trim"],
+  ["rgX", 2, "region"], ["rgY", 2, "region"], ["rgZ", 2, "region"],
+  ["rgSize", 2, "region"], ["rgSoft", 3, "region"],
+  ["rgR", 2, "region"], ["rgG", 2, "region"], ["rgB", 2, "region"],
+  ["revY", 3, "reveal"], ["revS", 3, "reveal"], ["revK", 2, "reveal"],
+  ["dAmt", 3, "displace"], ["dFrq", 2, "displace"],
+  ["dSpd", 2, "displace"], ["dRnd", 2, "displace"],
+  ["tR", 2, "colour"], ["tG", 2, "colour"], ["tB", 2, "colour"],
+  ["br", 0, "output"], ["settle", 0, "output"], ["dpr", 2, "viewport"],
 ];
 
 /* cullS is the one parameter whose slider is NOT the value itself.
@@ -920,6 +941,7 @@ for (const [id, digits] of SPEC) {          // pass 2: listeners
     /* Auto-key: an armed envelope owns its parameter, so a drag has to write
        into the curve or it would appear to do nothing. */
     if (ENV[id]?.on) setKey(id, playhead, P[id]);
+    refreshGroups();
     pushUniforms();
   });
 }
@@ -1052,10 +1074,68 @@ function refreshKeyBtn(id) {
     ? `${id}: ${bits.join(", ")} — click keys at playhead, alt-click removes`
     : `${id}: no automation — click to key at playhead`;
 }
-const refreshKeyBtns = () => { for (const id of ANIM) refreshKeyBtn(id); };
+/* ------------------------------------------------------------------ *
+ * Section accordion
+ *
+ * SPEC is on its way from 26 parameters to roughly 60. Everything hangs off
+ * it — resets, envelopes, audio routing, presets — so the grouping has to
+ * exist before more parameters arrive, not be retrofitted around them.
+ *
+ * Open/closed state lives in localStorage, deliberately NOT in presets: it
+ * describes your workspace, not the look, exactly like `Mobile profile`.
+ * ------------------------------------------------------------------ */
+const ACCORDION_KEY = "splatbench.accordion.v1";
+const groupIds = (g) => SPEC.filter(([, , gg]) => gg === g).map(([id]) => id);
 
+function saveAccordion() {
+  const out = {};
+  for (const el of document.querySelectorAll(".mod[data-group]")) {
+    out[el.dataset.group] = el.open;
+  }
+  try { localStorage.setItem(ACCORDION_KEY, JSON.stringify(out)); } catch { /* private mode */ }
+}
+
+function initAccordion() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(ACCORDION_KEY) || "null"); } catch { /* ignore */ }
+  for (const el of document.querySelectorAll(".mod[data-group]")) {
+    if (saved && typeof saved[el.dataset.group] === "boolean") el.open = saved[el.dataset.group];
+    el.addEventListener("toggle", saveAccordion);
+  }
+}
+
+/* Summary marker: a count when anything inside is driven, a dot when merely
+   modified, nothing when the whole group is at default. Mirrors the per-row
+   .dirty convention so the rail reads the same collapsed or expanded.
+
+   Deliberately not called from markDirty(): syncSliders() calls that for every
+   driven parameter on every frame during playback, and this walks all of SPEC. */
+function refreshGroups() {
+  for (const el of document.querySelectorAll(".mod[data-group]")) {
+    const flag = el.querySelector(".gflag");
+    if (!flag) continue;
+    let driven = 0, dirty = false;
+    for (const id of groupIds(el.dataset.group)) {
+      const a = AUD[id];
+      if (hasEnv(id) || (a && a.band && a.depth)) driven++;
+      if ($("p-" + id).value !== DEFAULT[id]) dirty = true;
+    }
+    flag.textContent = driven ? String(driven) : dirty ? "\u00b7" : "";
+    flag.classList.toggle("on", driven > 0 || dirty);
+    flag.title = driven
+      ? `${driven} parameter${driven === 1 ? "" : "s"} driven in this group`
+      : dirty ? "modified from default" : "";
+  }
+}
+
+const refreshKeyBtns = () => { for (const id of ANIM) refreshKeyBtn(id); refreshGroups(); };
+
+/* Single choke point for every envelope mutation — setKey, clearKey and all
+   the lane header buttons route through here, so the group markers only need
+   updating in this one place. */
 function refreshEnv(id) {
   refreshKeyBtn(id);
+  refreshGroups();
   laneHead();
   drawLane();
   pushUniforms();
@@ -1997,6 +2077,7 @@ $("audBand").onchange = () => {
   if (a.band && a.depth === 0) a.depth = 0.3;   // a sensible audible default
   laneHead();
   refreshKeyBtn(focused);
+  refreshGroups();
   pushUniforms();
 };
 $("audDepth").oninput = () => {
@@ -2156,6 +2237,8 @@ if (new URLSearchParams(location.search).has("debug")) {
 /* ------------------------------------------------------------------ *
  * Boot
  * ------------------------------------------------------------------ */
+initAccordion();
+refreshGroups();
 pushUniforms();
 updateClock();
 showDpr();
