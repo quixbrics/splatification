@@ -231,6 +231,200 @@ deferred behind a timer.
 
 ---
 
+## Model transform — Correct mode
+
+Position/rotation/scale on the loaded capture, so a scan that came out of
+reconstruction tilted, off-centre or in the wrong units can be corrected in the
+tool rather than in SuperSplat and re-exported. This replaces the old hardcoded
+`mesh.quaternion.set(1, 0, 0, 0)` Y-down fix — that value is now the *default*
+of the rotation controls (`mdRotX = 180`) rather than an invisible constant, so
+a capture that is not Y-down is correctable for the first time.
+
+### Locked behind an explicit mode, on purpose
+
+The transform is not live-editable from the rail. `Correct` is a mode: enter
+it, adjust with the numeric fields or the `TransformControls` gizmo, then
+`Commit` or `Cancel`. Outside the mode every field is `disabled` and nothing
+else in the codebase writes `mesh.position/rotation/scale` — there is exactly
+one write path (`applyXform()`), which is what makes a drag gizmo safe to offer
+at all.
+
+Interlocks, all asserted in the debug harness, not just implemented:
+
+- Entering Correct force-disables gesture `Adjust` (`setGesture(false)`) and
+  unchecks `camDrive` (`driveCamera()` reads it live, so this alone stops the
+  timeline fighting the gizmo). Both are restored on exit.
+- `syncControlsEnabled()` is the single choke point for `OrbitControls.enabled`
+  — both `setGesture()` and the gizmo's `dragging-changed` listener route
+  through it, rather than each setting the flag independently. Two systems
+  independently touching one shared flag is exactly how `Go A` / `Go B` got
+  clobbered earlier in this file; this phase does not repeat that shape of bug.
+- Verified: entering Adjust while correcting is refused outright; entering
+  Correct while Adjust is already open force-disables Adjust and proceeds;
+  simulating `xctl.dragging = true` disables orbit and re-enables it on
+  release; export is refused with a message while correcting.
+
+### The normalisation-basis split — and what it actually fixed
+
+`reframe()` used to compute `radius`/`bounds` from the mesh's **world-space**
+bounding box (`getBoundingBox(true).applyMatrix4(mesh.matrixWorld)`) and reuse
+that same box for camera framing. That conflates two different jobs, and
+Phase 2 splits them:
+
+- **Normalisation basis** (`radius`, `bounds`) — object-space, computed **once**
+  by `captureObjectBasis()` right after load, from `mesh.getBoundingBox(true)`
+  with **no** matrix applied. Frozen until the next splat load or preset load;
+  a Correct-mode edit never touches it.
+- **Camera framing** (`reframe()`) — world-space, using a **local** `worldRadius`
+  computed fresh from `getBoundingBox(true).applyMatrix4(mesh.matrixWorld)`
+  every time it is called. This is "what fits on screen given the current
+  pose," not "what a slider value means," and the two must not share a
+  variable.
+
+This is grounded in reading `getBoundingBox()` in spark.module.js 2.1.0
+directly, not inferred: it iterates raw per-splat `center`/`scales`/`quaternion`
+from `this.splats`, never touching the mesh's own Object3D transform. That
+confirms `objectModifiers` — what `buildModifier()` is registered as — operate
+on that same raw, untransformed data. `SplatEdit`/`SplatEditSdf` (the Region
+system) are architecturally different: `edit.add(sdf); mesh.add(edit)` parents
+them to the mesh, so they inherit its transform automatically through the
+ordinary scene graph. That is *why* Spark offers both mechanisms — dyno effects
+need this explicit basis freeze; region edits get transform-following for free
+and needed no change in this phase.
+
+**A latent bug this incidentally fixed.** Before this split, `bounds.min/max`
+(the reveal sweep's Y-threshold) was being computed in world space — i.e.
+*after* the 180° Y-down rotation — while the shader's `y` is raw object-space,
+*before* it. A pure 180°-about-X rotation preserves span but negates and swaps
+the endpoints, so the sweep plane's absolute position was measurably off from
+where the shader's own coordinate actually sat. It was invisible in every prior
+measurement because `revY`'s default is `1` (fully revealed), where the offset
+doesn't matter — an endpoint value shows "everything" regardless of exactly
+where the plane sits, as long as span is preserved (which a rigid rotation
+always preserves). The *sweep shape* did change once the frame was corrected —
+measured, same capture, same slider values:
+
+| revY | 0 | 0.25 | 0.5 | 0.75 | 0.9 | 1 |
+|---|---|---|---|---|---|---|
+| coverage % (old, world-frame bounds) | 0.12 | 2.8 | 6.5 | 9.7 | 10.3 | 10.3 |
+| coverage % (new, object-frame bounds) | 0 | 1.55 | 4.99 | 8.35 | 9.54 | 9.72 |
+
+Both are monotonic, working sweeps — this was never visibly "broken" — but only
+the new one is measuring the plane against the coordinate frame the shader
+actually uses.
+
+### Invalidation — measured, not assumed
+
+The obvious question: does a bare Object3D transform change (no dyno uniform
+touched) show up on the very next render, same as the original uniform-version
+bug, or does it need an explicit `mesh.updateVersion()`? Tested directly rather
+than guessed, with the camera held perfectly still:
+
+- A transform change followed by exactly **one** `renderer.render()` call
+  still shows the **stale** pose.
+- A **second** `renderer.render()` call — with nothing else touched in
+  between, no `pushUniforms()`, no `updateVersion()` — shows the **correct**
+  pose, and a third confirms it is stable there.
+- Calling `pushUniforms()` (and therefore `mesh.updateVersion()`) between the
+  two renders does **not** shortcut this to one render. It is unrelated to the
+  version-gate mechanism the uniform invariant documents.
+
+So this is a **different, already-documented hazard**, not a recurrence of the
+original bug: the same "render, then render again" latency NOTES already
+describes for camera moves and for the offline export loop's `settle` step —
+Spark's async sort needs one extra frame to catch up to a world-position
+change, of any kind. It is not a "stuck until something unrelated happens"
+failure, just a one-frame lag.
+
+**Consequence for the UI, not just the test:** during interactive Correct-mode
+editing, `frame()` calls `renderer.render()` on every animation frame
+regardless of what changed, so this self-resolves within about one frame
+(~16 ms) with no further user action — satisfying "visible without any further
+interaction" in the sense that matters, even though it is not literally the
+very next paint. It cannot bite an export, because export is refused outright
+while correcting, so a committed transform is always many frames "settled" by
+the time Render is clickable again.
+
+`applyXform()` still calls `pushUniforms()` on every edit. Not because it
+shortens the one-frame lag above — measured, it does not — but because it is
+free (confirmed: a single integer increment, no measurable cost) and it keeps
+every other normalised uniform consistent if anything about the load-time state
+changes in a future phase. Kept as a defensive no-op with a correct comment,
+not a fix for a problem it does not solve.
+
+### `mdScale` is log-mapped, same reasoning as `cullS`
+
+Slider is a 0..1 perceptual position, `xscaleOf(u) = 0.1 * (10/0.1)^u`, so
+`u = 0.5` maps to exactly `1.0` — the slider's own midpoint is the neutral
+scale, with no special-casing needed. Verified against the mesh's own
+**world-space** bounding box (not screen pixels — see below):
+
+| slider u | 0.5 (default) | 0.6505 (target 2×) |
+|---|---|---|
+| mapped scale | 1.000 | 1.995 |
+| world-space extent ratio | — | **1.9953×** (x/y/z identical) |
+
+### A measurement trap worth recording: perspective clipping looks like a bug
+
+The first attempt to verify "`mdScale = 2` doubles the rendered bbox" measured
+**screen-space pixel width**, and got 1.868–1.885×, not 2×. That is not an
+implementation defect — the doubled butterfly's bottom edge was measurably
+touching the canvas edge (`y1 = 780` of `H = 782`), i.e. genuinely clipped by
+the viewport, because `reframe()` is deliberately **not** called on every
+Correct-mode edit (a live camera re-fit while dragging a slider would be
+disorienting, defeating the point of a stable reference frame to correct
+against). A screen-space measurement is only valid when nothing is clipped or
+foreshortened; **the mesh's own world-space bounding box is the correct
+instrument** for verifying a transform edit, not pixel coverage. Coverage stays
+the right tool for verifying *effects* (which don't move the camera-relevant
+extent), just not for verifying the *transform* itself mid-edit.
+
+### A real bug this phase's own testing caught: `xformReset()` skipped the reframe
+
+`Reset transform` originally called `reframe()` only `if (correcting)`. Outside
+Correct mode (its normal, undisabled state — the button works at any time by
+design) it reset the mesh's geometry but left the camera framed for whatever
+the *previous* transform looked like. Concretely: load a preset with an
+extreme transform (which does call `reframe()`), then click Reset outside
+Correct mode — the geometry snaps back to default size/position, but the
+camera stays fitted to the old, larger/offset pose, leaving the now-correct
+model tiny or off-centre. Measured as a full regression-sweep collapse (every
+coverage figure near zero) before being traced to this. Fixed: `reframe()` is
+now unconditional in `xformReset()` — any discrete, deliberate transform
+mutation (load, commit, cancel, reset, preset) reframes; only *continuous*
+edits (slider drag, gizmo drag) deliberately do not.
+
+### Preset
+
+`transform: {...xform}` — additive, no version bump. A preset with no
+`transform` block takes `XFORM_DEFAULT`, reproducing the pre-Phase-2 hardcoded
+behaviour exactly. A preset with one is clamped field-by-field to each
+control's own range, same treatment as every other preset value; a hostile
+preset (`rotX: 9999, posX: 50, mdScale: 5, rotZ: "nan"`, …) loads cleanly with
+every field clamped and no warning raised. Loading a preset while correcting
+exits the mode first.
+
+Property of the *capture*, not the workspace — unlike `Mobile profile` — so
+unlike that toggle, this belongs in the file. Presets reference the asset by
+name only, so a transform saved against one capture and loaded against another
+is meaningless; harmless, not worth guarding against.
+
+### Not in `SPEC`, on purpose
+
+`mdRotX/Y/Z`, `mdPosX/Y/Z`, `mdScale` are hand-wired rather than added to
+`SPEC`: a locked transform cannot carry an envelope, so SPEC membership would
+buy free reset/preset/audio wiring for a control that structurally cannot use
+most of it. The rows carry two `.key.ghost` placeholders each (no per-row reset
+button, no key glyph) purely to keep the grid's label/output columns aligned
+with every SPEC-driven row — there is a single bulk `Reset transform` button
+instead. The accordion's `.gflag` summary marker is hand-managed too
+(`refreshModelUI()`, keyed off `#modelFlag` by id) since `groupIds("model")` is
+empty; `refreshGroups()` now explicitly skips any group with no `SPEC` entries,
+rather than silently clobbering a hand-managed flag with an always-empty
+computation — a real conflict caught before it shipped, not after.
+
+---
+
 ## Region — Spark's native SDF edit
 
 Roadmap item 4. This is **not** a dyno effect and does not belong in

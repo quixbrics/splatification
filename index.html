@@ -214,6 +214,10 @@
   }
   input[type=range]::-moz-range-thumb{width:2px; height:11px; background:var(--signal); border:0; border-radius:0}
   input[type=range]:focus-visible{outline:1px solid var(--signal); outline-offset:2px}
+  /* Model transform fields: locked outside Correct mode, per NOTES — the
+     transform is not live-editable from the rail, only from inside the mode. */
+  input[type=range]:disabled{opacity:.32; cursor:default}
+  input[type=range]:disabled::-webkit-slider-thumb{cursor:default}
 
   button, select{
     font:inherit; color:var(--ink); background:var(--chassis-hi);
@@ -223,6 +227,21 @@
   button:hover{border-color:var(--ink-dim)}
   button:focus-visible, select:focus-visible{outline:1px solid var(--signal); outline-offset:1px}
   button[disabled]{opacity:.35; cursor:default}
+  /* Correct mode outline on the viewport, echoing the gesture-mode outline so
+     the two modal states read as visually related but distinguishable
+     (--edit violet vs --edit-adjacent). */
+  body.correcting #stage{outline:1px solid var(--edit); outline-offset:-2px}
+  /* Bottom-RIGHT, not bottom-left: the Adjust button lives at
+     left:12px, bottom: dock+lane+10px, and the two overlapped there (caught
+     in a screenshot, not by any measurement — genuinely worth eyeballing a
+     modal's on-screen text at least once). Gesture mode is force-disabled
+     while correcting, so the palette that would otherwise occupy this strip
+     is guaranteed hidden. */
+  body.correcting #stage::after{
+    content:"CORRECT — drag the gizmo or use the sliders";
+    position:absolute; right:14px; bottom:12px; pointer-events:none;
+    color:var(--edit); font-size:10px; letter-spacing:.08em; text-transform:uppercase;
+  }
   button.on{color:var(--signal); border-color:var(--signal)}
   button.live{color:var(--live); border-color:var(--live)}
   .btns{display:flex; gap:6px; flex-wrap:wrap}
@@ -378,6 +397,41 @@
       <input type="range" id="p-ease" min="0" max="1" step="0.01" value="0.8"></div>
     <div class="row"><label>Duration (s)</label><output id="o-dur">—</output>
       <input type="range" id="p-dur" min="1" max="30" step="0.5" value="8"></div>
+  </details>
+
+  <details class="mod" data-group="model">
+    <summary>Model <em>correct</em><i class="gflag" id="modelFlag"></i></summary>
+    <div class="btns" style="margin-bottom:9px">
+      <button id="correctToggle" aria-pressed="false">Correct</button>
+      <button id="xformCommit" disabled>Commit</button>
+      <button id="xformCancel" disabled>Cancel</button>
+      <button id="xformReset">Reset transform</button>
+    </div>
+    <div class="btns" style="margin-bottom:9px">
+      <button id="gizMove" class="on" disabled>Move</button>
+      <button id="gizRotate" disabled>Rotate</button>
+      <button id="gizScale" disabled>Scale</button>
+    </div>
+    <div class="row"><label>Rotate X</label><i class="key ghost"></i><i class="key ghost"></i><output id="o-mdRotX">—</output>
+      <input type="range" id="p-mdRotX" min="-180" max="180" step="0.5" value="180" disabled></div>
+    <div class="row"><label>Rotate Y</label><i class="key ghost"></i><i class="key ghost"></i><output id="o-mdRotY">—</output>
+      <input type="range" id="p-mdRotY" min="-180" max="180" step="0.5" value="0" disabled></div>
+    <div class="row"><label>Rotate Z</label><i class="key ghost"></i><i class="key ghost"></i><output id="o-mdRotZ">—</output>
+      <input type="range" id="p-mdRotZ" min="-180" max="180" step="0.5" value="0" disabled></div>
+    <div class="row"><label>Position X</label><i class="key ghost"></i><i class="key ghost"></i><output id="o-mdPosX">—</output>
+      <input type="range" id="p-mdPosX" min="-2" max="2" step="0.01" value="0" disabled></div>
+    <div class="row"><label>Position Y</label><i class="key ghost"></i><i class="key ghost"></i><output id="o-mdPosY">—</output>
+      <input type="range" id="p-mdPosY" min="-2" max="2" step="0.01" value="0" disabled></div>
+    <div class="row"><label>Position Z</label><i class="key ghost"></i><i class="key ghost"></i><output id="o-mdPosZ">—</output>
+      <input type="range" id="p-mdPosZ" min="-2" max="2" step="0.01" value="0" disabled></div>
+    <div class="row"><label>Scale</label><i class="key ghost"></i><i class="key ghost"></i><output id="o-mdScale">—</output>
+      <input type="range" id="p-mdScale" min="0" max="1" step="0.002" value="0.5" disabled></div>
+    <p style="color:var(--ink-dim); margin:8px 0 0">
+      Euler order XYZ. Position is in multiples of scene radius, scale is log-mapped.
+      Locked outside <strong>Correct</strong> — this cannot be animated, keyframed, or
+      routed to audio, and it is not the same thing as a per-region transform. Rotate X
+      180° is the default Y-down correction most captures need.
+    </p>
   </details>
 
   <details class="mod" data-group="trim">
@@ -560,6 +614,7 @@ addEventListener("unhandledrejection", (e) =>
 
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { SparkRenderer, SplatMesh, SplatEdit, SplatEditSdf, dyno } from "@sparkjsdev/spark";
 import { Muxer, ArrayBufferTarget } from "mp4-muxer";
 
@@ -581,6 +636,31 @@ let playing = false;
 let rendering = false;
 const bounds = { min: -1, max: 1 };   // object-space Y extent
 const P = {};                         // parameter values, keyed by slider id
+
+/* ------------------------------------------------------------------ *
+ * Model transform — position/rotation/scale on the loaded capture.
+ *
+ * Standard three.js Object3D transform, not dyno: Spark's objectModifiers
+ * operate on raw per-splat local data (confirmed by reading getBoundingBox()
+ * in spark.module.js 2.1.0 — it iterates raw center/scales/quaternion,
+ * untouched by the mesh's own position/rotation/scale). Putting the
+ * correction in the shader would mean object space no longer matches what
+ * this panel says; three.js's own transform is the right layer for it.
+ *
+ * Locked outside an explicit `correcting` mode. See NOTES "Model transform"
+ * for why: it removes frame-to-frame normalisation wobble by construction,
+ * gives the transform exactly one write path, and makes a drag gizmo safe to
+ * offer (TransformControls only ever touches the mesh while this is true).
+ *
+ * Not in SPEC: a locked transform cannot carry an envelope, so it gets none
+ * of SPEC's free reset/preset/audio wiring. Hand-wired below instead —
+ * accepted cost, see NOTES.
+ * ------------------------------------------------------------------ */
+const XFORM_DEFAULT = { rotX: 180, rotY: 0, rotZ: 0, posX: 0, posY: 0, posZ: 0, mdScale: 0.5 };
+let xform = { ...XFORM_DEFAULT };     // COMMITTED transform; drives the mesh
+let xformEntry = null;                // snapshot on entering Correct, for Cancel
+let correcting = false;
+let prevCamDriveChecked = null;       // restored on leaving Correct
 
 /* ------------------------------------------------------------------ *
  * three + spark
@@ -613,6 +693,37 @@ scene.add(spark);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
+
+/* TransformControls is the Correct-mode gizmo. Constructed once and left in
+   the scene permanently — .attach()/.detach() and visibility follow
+   `correcting`, so there is no per-entry construction cost and no risk of a
+   stale second instance. `getHelper()` because three r160+ split the control
+   logic (non-visual, extends Controls) from its Object3D gizmo mesh — the
+   helper is what actually needs adding to the scene. */
+const xctl = new TransformControls(camera, renderer.domElement);
+xctl.setMode("translate");
+xctl.size = 0.9;
+scene.add(xctl.getHelper());
+xctl.enabled = false;
+xctl.getHelper().visible = false;
+
+/* Single choke point for who is allowed to drive OrbitControls this frame.
+   Gesture Adjust and a gizmo drag both need it OFF while they act — two
+   independent systems each setting controls.enabled directly is exactly how
+   Go A / Go B got clobbered earlier in this file; route both through here. */
+let draggingGizmo = false;
+function syncControlsEnabled() {
+  controls.enabled = !gestureOn && !draggingGizmo;
+}
+xctl.addEventListener("dragging-changed", (e) => {
+  draggingGizmo = e.value;
+  syncControlsEnabled();
+});
+/* Gizmo drag -> numeric fields. The reverse direction (fields -> gizmo) needs
+   no listener: TransformControls redraws itself from the object's own
+   position/quaternion/scale every frame, so writing those directly from a
+   slider is already enough. */
+xctl.addEventListener("objectChange", () => { if (correcting) syncXformFromMesh(); });
 
 /* ------------------------------------------------------------------ *
  * Mobile profile
@@ -1135,10 +1246,12 @@ function initAccordion() {
    driven parameter on every frame during playback, and this walks all of SPEC. */
 function refreshGroups() {
   for (const el of document.querySelectorAll(".mod[data-group]")) {
+    const ids = groupIds(el.dataset.group);
+    if (!ids.length) continue;      // e.g. "model" — hand-managed, see refreshModelUI()
     const flag = el.querySelector(".gflag");
     if (!flag) continue;
     let driven = 0, dirty = false;
-    for (const id of groupIds(el.dataset.group)) {
+    for (const id of ids) {
       const a = AUD[id];
       if (hasEnv(id) || (a && a.band && a.depth)) driven++;
       if ($("p-" + id).value !== DEFAULT[id]) dirty = true;
@@ -1404,6 +1517,187 @@ function attachRegion(m) {
   edit = new SplatEdit({ rgbaBlendMode: "multiply", softEdge: 0 });
   edit.add(sdf);                    // parent it: the SDF's world matrix is the shape
   m.add(edit);                      // scope the edit to this mesh
+  /* edit is a child of m, so it inherits m's own position/rotation/scale
+     automatically — region edits travel WITH the model transform for free.
+     Nothing here needs to change for Correct mode. */
+}
+
+/* ------------------------------------------------------------------ *
+ * Model transform — see the state-block comment above for why this is a
+ * locked three.js Object3D transform rather than a dyno graph parameter.
+ * ------------------------------------------------------------------ */
+const DEG = Math.PI / 180;
+
+/* mdScale slider is a 0..1 perceptual position, log-mapped onto 0.1..10 —
+   same reasoning as cullS: a linear slider on a multiplicative quantity puts
+   everything useful in a narrow band, and "half as big" / "twice as big"
+   should feel equidistant from 1x regardless of direction. u=0.5 -> 1.0
+   exactly (log(1/0.1)/log(10/0.1) = log(10)/log(100) = 0.5), so the default
+   sits at the slider's own midpoint. */
+const XSCALE_MIN = 0.1, XSCALE_MAX = 10;
+const xscaleOf = (u) => XSCALE_MIN * Math.pow(XSCALE_MAX / XSCALE_MIN, u);
+
+/* Object-space bounding box, computed directly from the raw per-splat data
+   Spark's SplatMesh.getBoundingBox() reads (confirmed in spark.module.js
+   2.1.0: it iterates center/scales/quaternion from `this.splats`, never
+   touching the mesh's own Object3D transform). This is the basis dyno's
+   `buildModifier` actually operates in, since objectModifiers run on that
+   same raw per-splat data before Spark applies the mesh's own matrixWorld
+   for final placement — so freezing radius/bounds from this box, once, is
+   what makes every normalised parameter (dAmt, cullS, region size, the
+   reveal sweep) stop moving when the model transform is adjusted in Correct
+   mode. Camera framing is a SEPARATE, world-space computation — see
+   reframe() below — recomputed on every transform change, on purpose. */
+function captureObjectBasis() {
+  if (!mesh) return;
+  const box = mesh.getBoundingBox(true);
+  const sphere = box.getBoundingSphere(new THREE.Sphere());
+  radius = Math.max(sphere.radius, 1e-4);
+  bounds.min = box.min.y;
+  bounds.max = box.max.y;
+}
+
+/* The transform's one write path. Called on load (with XFORM_DEFAULT), on
+   every field/gizmo edit while `correcting`, and on preset load. Nothing
+   else may touch mesh.position/rotation/scale. */
+function applyXform() {
+  if (!mesh) return;
+  mesh.rotation.set(xform.rotX * DEG, xform.rotY * DEG, xform.rotZ * DEG, "XYZ");
+  mesh.position.set(xform.posX * radius, xform.posY * radius, xform.posZ * radius);
+  mesh.scale.setScalar(xscaleOf(xform.mdScale));
+  mesh.updateMatrixWorld(true);
+
+  /* THE OTHER CATCH, tested empirically (see NOTES "Model transform —
+     invalidation"): a pure Object3D transform change does not touch any dyno
+     uniform, but Spark's regenerate gate also keys off `viewChanged`, which
+     tracks the CAMERA, not the object. With the camera held still, a
+     transform commit was measured invisible until something else moved the
+     camera — the same failure shape as the original uniform bug. Routing
+     through pushUniforms() (which ends in mesh.updateVersion()) fixes it,
+     and costs nothing measurable per NOTES' existing frame-time findings. */
+  pushUniforms();
+}
+
+/* Gizmo drag -> panel. Reads the mesh's own transform back into `xform`
+   rather than trying to track the gizmo's internal delta, so any drag mode
+   (move/rotate/scale) and any combination of axes converges on the same
+   state a slider edit would produce. */
+function syncXformFromMesh() {
+  if (!mesh) return;
+  const e = mesh.rotation;                 // three keeps rotation/quaternion in sync
+  xform.rotX = e.x / DEG;
+  xform.rotY = e.y / DEG;
+  xform.rotZ = e.z / DEG;
+  xform.posX = radius > 1e-9 ? mesh.position.x / radius : 0;
+  xform.posY = radius > 1e-9 ? mesh.position.y / radius : 0;
+  xform.posZ = radius > 1e-9 ? mesh.position.z / radius : 0;
+  const s = mesh.scale.x;                  // uniform only — x/y/z always equal
+  xform.mdScale = Math.log(Math.max(s, 1e-6) / XSCALE_MIN) / Math.log(XSCALE_MAX / XSCALE_MIN);
+  refreshModelUI();
+  pushUniforms();
+}
+
+function refreshModelUI() {
+  const set = (id, v, digits) => { $("p-" + id).value = v; $("o-" + id).textContent = v.toFixed(digits); };
+  set("mdRotX", xform.rotX, 1); set("mdRotY", xform.rotY, 1); set("mdRotZ", xform.rotZ, 1);
+  set("mdPosX", xform.posX, 2); set("mdPosY", xform.posY, 2); set("mdPosZ", xform.posZ, 2);
+  $("p-mdScale").value = xform.mdScale;
+  $("o-mdScale").textContent = xscaleOf(xform.mdScale).toFixed(3);
+
+  const dirty = JSON.stringify(xform) !== JSON.stringify(XFORM_DEFAULT);
+  const flag = $("modelFlag");
+  flag.textContent = correcting ? "\u25CF" : dirty ? "\u00b7" : "";
+  flag.classList.toggle("on", correcting || dirty);
+  flag.title = correcting ? "Correct mode is open" : dirty ? "transform modified from default" : "";
+}
+
+function enterCorrect() {
+  if (!mesh || correcting) return;
+  correcting = true;
+  xformEntry = { ...xform };
+  prevCamDriveChecked = $("camDrive").checked;
+  $("camDrive").checked = false;           // driveCamera() reads this live; see NOTES
+  setGesture(false);                       // Correct owns the viewport — see syncControlsEnabled
+
+  document.body.classList.add("correcting");
+  $("correctToggle").classList.add("on");
+  $("correctToggle").setAttribute("aria-pressed", "true");
+  $("correctToggle").textContent = "Correcting…";
+  for (const id of ["xformCommit", "xformCancel", "gizMove", "gizRotate", "gizScale"]) $(id).disabled = false;
+  for (const id of ["mdRotX", "mdRotY", "mdRotZ", "mdPosX", "mdPosY", "mdPosZ", "mdScale"]) $("p-" + id).disabled = false;
+  $("gestureToggle").disabled = true;
+  $("render").disabled = true;
+
+  xctl.attach(mesh);
+  xctl.enabled = true;
+  xctl.getHelper().visible = true;
+  syncControlsEnabled();
+  refreshModelUI();
+}
+
+function leaveCorrect() {
+  correcting = false;
+  $("camDrive").checked = prevCamDriveChecked;
+  prevCamDriveChecked = null;
+
+  document.body.classList.remove("correcting");
+  $("correctToggle").classList.remove("on");
+  $("correctToggle").setAttribute("aria-pressed", "false");
+  $("correctToggle").textContent = "Correct";
+  for (const id of ["xformCommit", "xformCancel", "gizMove", "gizRotate", "gizScale"]) $(id).disabled = true;
+  for (const id of ["mdRotX", "mdRotY", "mdRotZ", "mdPosX", "mdPosY", "mdPosZ", "mdScale"]) $("p-" + id).disabled = true;
+  $("gestureToggle").disabled = false;
+  $("render").disabled = !CAN_EXPORT;
+
+  xctl.detach();
+  xctl.enabled = false;
+  xctl.getHelper().visible = false;
+  draggingGizmo = false;
+  syncControlsEnabled();
+  refreshModelUI();
+  reframe();                               // the committed (or restored) pose may have moved on screen
+}
+
+$("correctToggle").onclick = () => { if (correcting) return; enterCorrect(); };
+$("xformCommit").onclick = () => { if (!correcting) return; leaveCorrect(); };
+$("xformCancel").onclick = () => {
+  if (!correcting || !xformEntry) return;
+  xform = { ...xformEntry };
+  applyXform();
+  leaveCorrect();
+};
+$("xformReset").onclick = () => {
+  /* Usable at any time, not gated to Correct mode — a quick "undo any
+     correction right now" affordance. reframe() is UNCONDITIONAL: the
+     geometry visibly changes size/position regardless of whether Correct is
+     open, and the camera was possibly fitted to whatever the PREVIOUS
+     transform looked like (on load, on commit, on a prior preset). Gating
+     this on `correcting` was a real bug caught in testing — the camera stayed
+     framed for a stale transform after a reset made outside Correct mode,
+     leaving the (now correctly-sized) model tiny or off-centre on screen. */
+  xform = { ...XFORM_DEFAULT };
+  applyXform();
+  refreshModelUI();
+  reframe();
+};
+
+for (const [id, key] of [["mdRotX", "rotX"], ["mdRotY", "rotY"], ["mdRotZ", "rotZ"],
+                          ["mdPosX", "posX"], ["mdPosY", "posY"], ["mdPosZ", "posZ"],
+                          ["mdScale", "mdScale"]]) {
+  $("p-" + id).addEventListener("input", (e) => {
+    xform[key] = parseFloat(e.target.value);
+    applyXform();
+    refreshModelUI();
+  });
+}
+
+for (const [id, mode] of [["gizMove", "translate"], ["gizRotate", "rotate"], ["gizScale", "scale"]]) {
+  $(id).onclick = () => {
+    if (!correcting) return;
+    xctl.setMode(mode);
+    for (const [bid] of [["gizMove"], ["gizRotate"], ["gizScale"]]) $(bid).classList.remove("on");
+    $(id).classList.add("on");
+  };
 }
 
 const WHITE = new THREE.Color(1, 1, 1);
@@ -1541,9 +1835,14 @@ async function loadSplat(source, label) {
 
     attachRegion(mesh);
 
-    // splat captures are usually Y-down relative to three.js
-    mesh.quaternion.set(1, 0, 0, 0);
-    mesh.updateMatrixWorld(true);
+    /* Freeze the normalisation basis from the RAW capture, before any
+       transform — including the default correction below — is applied.
+       Each new capture gets its own default correction rather than
+       inheriting whatever the previous one needed. */
+    captureObjectBasis();
+    xform = { ...XFORM_DEFAULT };
+    applyXform();
+    refreshModelUI();
     reframe();
 
     const n = splatCount(mesh).toLocaleString();
@@ -1560,14 +1859,17 @@ async function loadSplat(source, label) {
   }
 }
 
+/* Camera framing — WORLD-space, recomputed on every load, on demand, and on
+   every model-transform change. Deliberately separate from `radius`/`bounds`
+   (object-space, frozen once by captureObjectBasis()): this is "what fits on
+   screen given how the model is currently posed", not "what a slider value
+   means". Conflating the two was the bug — see NOTES "Model transform". */
 function reframe() {
   if (!mesh) return;
   mesh.updateMatrixWorld(true);
   const box = mesh.getBoundingBox(true).applyMatrix4(mesh.matrixWorld);
   const sphere = box.getBoundingSphere(new THREE.Sphere());
-  radius = Math.max(sphere.radius, 1e-4);
-  bounds.min = box.min.y;
-  bounds.max = box.max.y;
+  const worldRadius = Math.max(sphere.radius, 1e-4);
 
   controls.target.copy(sphere.center);
 
@@ -1579,10 +1881,10 @@ function reframe() {
      hFov > vFov, so this reduces to the previous constant. */
   const vFov = (camera.fov * Math.PI) / 180;
   const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
-  const dist = (radius / Math.sin(Math.min(vFov, hFov) / 2)) * 1.1;
+  const dist = (worldRadius / Math.sin(Math.min(vFov, hFov) / 2)) * 1.1;
   camera.position.copy(sphere.center).add(new THREE.Vector3(0, 0, dist));
-  camera.near = radius / 200;
-  camera.far = radius * 60;
+  camera.near = worldRadius / 200;
+  camera.far = worldRadius * 60;
   camera.updateProjectionMatrix();
   controls.update();
   pushUniforms();
@@ -1732,6 +2034,7 @@ async function drain(encoder, below) {
 
 $("render").onclick = async () => {
   if (!mesh) { setStatus("Load a splat first.", true); return; }
+  if (correcting) { setStatus("Exit Correct mode before rendering.", true); return; }
   if (rendering) return;
   if (typeof VideoEncoder === "undefined") {
     setStatus("No WebCodecs VideoEncoder in this browser. Use Chrome or Edge.", true);
@@ -1876,6 +2179,11 @@ function serialize() {
     output: { res: $("res").value, fps: $("fps").value },   // kept for v1 readers
     camera: { A: vec(key.A), B: vec(key.B) },
     envelopes: envs,
+    /* Property of the capture, not the workspace — unlike Mobile profile,
+       this belongs in the file. Presets reference the asset by name only, so
+       a transform saved against one capture and loaded against another is
+       meaningless; harmless, and not worth guarding against. */
+    transform: { ...xform },
     /* Routing only. The audio file itself is referenced by name and never
        embedded, exactly as the splat is — reload the track, keep the routing. */
     audio: {
@@ -1963,6 +2271,27 @@ function applyPreset(o) {
   $("setA").classList.toggle("on", !!key.A);
   $("setB").classList.toggle("on", !!key.B);
 
+  /* Additive, no version bump: a preset with no transform block takes
+     XFORM_DEFAULT, which reproduces the pre-Phase-2 hardcoded Y-flip
+     exactly. A preset WITH one is clamped field-by-field against its own
+     slider's range, same as every other preset value. */
+  if (correcting) leaveCorrect();
+  const t = o.transform;
+  xform = t && typeof t === "object"
+    ? {
+        rotX: clamp(Number(t.rotX) || 0, -180, 180),
+        rotY: clamp(Number(t.rotY) || 0, -180, 180),
+        rotZ: clamp(Number(t.rotZ) || 0, -180, 180),
+        posX: clamp(Number(t.posX) || 0, -2, 2),
+        posY: clamp(Number(t.posY) || 0, -2, 2),
+        posZ: clamp(Number(t.posZ) || 0, -2, 2),
+        mdScale: clamp(Number(t.mdScale) ?? 0.5, 0, 1),
+      }
+    : { ...XFORM_DEFAULT };
+  applyXform();
+  refreshModelUI();
+  reframe();
+
   pushUniforms();
   syncSliders();
   refreshKeyBtns();
@@ -2030,8 +2359,9 @@ for (const id of ANIM) {
 paintPalette();
 
 function setGesture(on) {
+  if (on && correcting) return;           // Correct owns the viewport; see syncControlsEnabled
   gestureOn = on;
-  controls.enabled = !on;                 // modal: never both at once
+  syncControlsEnabled();                  // modal: never both Adjust and orbit/gizmo at once
   document.body.classList.toggle("gesture", on);
   $("gestureToggle").textContent = on ? "Orbit" : "Adjust";
   $("gestureToggle").classList.toggle("on", on);
@@ -2246,6 +2576,12 @@ if (new URLSearchParams(location.search).has("debug")) {
     get dyno() { return dyno; },          // for verifying stdlib call forms
     get U()    { return U; },
     get gest() { return GEST; },
+    get xform(){ return xform; },
+    get correcting(){ return correcting; },
+    get radius(){ return radius; },
+    get bounds(){ return bounds; },
+    xctl,
+    pushUniforms,
     draw() {
       pushUniforms();
       driveCamera();
