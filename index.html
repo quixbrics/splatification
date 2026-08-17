@@ -423,19 +423,48 @@
 
   <details class="mod" data-group="camera" open>
     <summary>Shot <em>camera</em><i class="gflag"></i></summary>
-    <div class="btns" style="margin-bottom:9px">
-      <button id="camAddKey" title="Add a camera keyframe at the current playhead">Add key</button>
-      <button id="camRemoveKey" title="Remove the camera keyframe at the current playhead">Remove key</button>
-      <button id="camSmooth" title="Path shape between keyframes" class="on">Smooth</button>
+    <div class="btns" style="margin-bottom:9px" id="camModeBtns">
+      <button type="button" data-mode="manual" title="Mouse/touch orbit only, nothing drives the camera">Manual</button>
+      <button type="button" data-mode="keyframes" class="on" title="Camera follows the keyframe path below">Keyframes</button>
+      <button type="button" data-mode="orbit" title="Camera follows a generated turntable move">Orbit</button>
     </div>
-    <label class="check"><input type="checkbox" id="camDrive" checked> Timeline drives camera</label>
     <div class="row"><label>Ease</label><output id="o-ease">—</output>
       <input type="range" id="p-ease" min="0" max="1" step="0.01" value="0.8"></div>
     <div class="row"><label>Duration (s)</label><output id="o-dur">—</output>
       <input type="range" id="p-dur" min="1" max="30" step="0.5" value="8"></div>
-    <p style="color:var(--ink-dim); margin:8px 0 0" id="camKeyCount">
+
+    <div class="btns" style="margin:9px 0" id="camKeyBtns">
+      <button id="camAddKey" title="Add a camera keyframe at the current playhead">Add key</button>
+      <button id="camRemoveKey" title="Remove the camera keyframe at the current playhead">Remove key</button>
+      <button id="camSmooth" title="Path shape between keyframes" class="on">Smooth</button>
+    </div>
+    <p style="color:var(--ink-dim); margin:8px 0" id="camKeyCount">
       No camera keyframes — camera stays under manual orbit control.
     </p>
+
+    <div id="camOrbitRows">
+      <div class="btns" style="margin:9px 0">
+        <select id="obAxis" title="Axis the camera revolves about">
+          <option value="Y" selected>Y axis</option>
+          <option value="X">X axis</option>
+          <option value="Z">Z axis</option>
+        </select>
+      </div>
+      <div class="row"><label>Turns</label><output id="o-obTurns">—</output>
+        <input type="range" id="p-obTurns" min="-3" max="3" step="0.01" value="1"></div>
+      <div class="row"><label>Phase</label><output id="o-obPhase">—</output>
+        <input type="range" id="p-obPhase" min="0" max="1" step="0.002" value="0"></div>
+      <div class="row"><label>Elevation</label><output id="o-obElev">—</output>
+        <input type="range" id="p-obElev" min="-1" max="1" step="0.005" value="0"></div>
+      <div class="row"><label>Distance</label><output id="o-obDist">—</output>
+        <input type="range" id="p-obDist" min="0.3" max="8" step="0.01" value="2.6"></div>
+      <p style="color:var(--ink-dim); margin:8px 0 0">
+        Turns is signed — negative reverses direction. Distance is in multiples of
+        scene radius and re-centres on the current framing whenever the view is
+        reframed. Orbit always centres on the current orbit target, not a stored
+        keyframe.
+      </p>
+    </div>
   </details>
 
   <details class="mod" data-group="model">
@@ -690,7 +719,7 @@ const XFORM_DEFAULT = { rotX: 180, rotY: 0, rotZ: 0, posX: 0, posY: 0, posZ: 0, 
 let xform = { ...XFORM_DEFAULT };     // COMMITTED transform; drives the mesh
 let xformEntry = null;                // snapshot on entering Correct, for Cancel
 let correcting = false;
-let prevCamDriveChecked = null;       // restored on leaving Correct
+let prevCamModeForCorrect = null;      // restored on leaving Correct
 
 /* ------------------------------------------------------------------ *
  * three + spark
@@ -1052,6 +1081,7 @@ for (let i = 1; i <= MAX_REGIONS; i++) {
 
 const SPEC = [
   ["ease", 2, "camera"], ["dur", 1, "camera"],
+  ["obTurns", 2, "camera"], ["obPhase", 3, "camera"], ["obElev", 3, "camera"], ["obDist", 2, "camera"],
   ["cullA", 2, "trim"], ["cullS", 4, "trim"], ["scale", 2, "trim"],
   ...REGION_SPEC,
   ["dAmt", 3, "displace"], ["dFrq", 2, "displace"],
@@ -1826,8 +1856,8 @@ function enterCorrect() {
   if (!mesh || correcting) return;
   correcting = true;
   xformEntry = { ...xform };
-  prevCamDriveChecked = $("camDrive").checked;
-  $("camDrive").checked = false;           // driveCamera() reads this live; see NOTES
+  prevCamModeForCorrect = camMode;
+  setCamMode("manual");                    // driveCamera() reads camMode live; see NOTES
   setGesture(false);                       // Correct owns the viewport — see syncControlsEnabled
 
   document.body.classList.add("correcting");
@@ -1848,8 +1878,8 @@ function enterCorrect() {
 
 function leaveCorrect() {
   correcting = false;
-  $("camDrive").checked = prevCamDriveChecked;
-  prevCamDriveChecked = null;
+  setCamMode(prevCamModeForCorrect);
+  prevCamModeForCorrect = null;
 
   document.body.classList.remove("correcting");
   $("correctToggle").classList.remove("on");
@@ -2063,6 +2093,30 @@ function reframe() {
   camera.far = worldRadius * 60;
   camera.updateProjectionMatrix();
   controls.update();
+
+  /* obDist's sensible "neutral" value is inherently tied to the current
+     framing, unlike every other SPEC default (captured once, statically,
+     from the HTML value attribute) — there is no single constant that is
+     right for every capture. Recompute what "default" MEANS on every
+     reframe, so switching to Orbit starts at roughly the current view and a
+     reset un-modifies back to THIS framing rather than a stale one. Only
+     overwrite the LIVE value if the user has not already moved it away from
+     its old default — reframe() runs on every load, transform commit and
+     preset load, and silently discarding a deliberate obDist customisation
+     because an unrelated Correct-mode edit was committed would be a much
+     worse surprise than a slider not tracking a reframe it had no reason to
+     care about. */
+  const distEl = $("p-obDist");
+  const obDistNow = clamp(worldRadius > 1e-9 ? dist / worldRadius : 2.6,
+                           parseFloat(distEl.min), parseFloat(distEl.max));
+  const wasAtDefault = distEl.value === DEFAULT.obDist;
+  DEFAULT.obDist = String(obDistNow);
+  if (wasAtDefault) {
+    distEl.value = obDistNow;
+    P.obDist = obDistNow;
+    $("o-obDist").textContent = obDistNow.toFixed(2);
+  }
+
   pushUniforms();
 }
 
@@ -2190,14 +2244,76 @@ function sampleCam(playheadT) {
   return { pos: lerp3(a.pos, b.pos, localU), tgt: lerp3(a.tgt, b.tgt, localU), fov };
 }
 
+/* ------------------------------------------------------------------ *
+ * Camera drive mode — Manual | Keyframes | Orbit
+ *
+ * Was a single `camDrive` checkbox layered on top of whatever the keyframe
+ * system happened to contain. That shape is exactly what let `Go A` get
+ * silently overwritten earlier in this project's history: two things (a
+ * checkbox and a driver) both partly deciding whether something owned the
+ * camera. A single string with exactly three values, switched on once in
+ * driveCamera(), makes "two drivers write the camera in one frame"
+ * structurally impossible rather than merely unlikely — there is only one
+ * branch any given frame can take.
+ * ------------------------------------------------------------------ */
+let camMode = "keyframes";            // "manual" | "keyframes" | "orbit"
+                                       // prevCamModeForCorrect, declared with module state up top, restores this on leaving Correct
+
+/* Orbit centres on controls.target and reads it LIVE rather than a frozen
+   copy, so framing a subject (drag, Reframe, load) and then switching to
+   Orbit does what it looks like it should. Orbit never writes the target —
+   only position — so it never fights whatever set the target in the first
+   place. `obAxis` selects which world axis stays (near-)constant: at the
+   default elevation 0 it is held EXACTLY constant, since the elevation term
+   is the only thing that ever moves it off `target[axis]`. */
+function sampleOrbit(t) {
+  const axis = $("obAxis").value;
+  const angle = 2 * Math.PI * (V.obPhase + t * V.obTurns);
+  const dist = Math.max(V.obDist * radius, 1e-4);
+  const elevAngle = V.obElev * (Math.PI / 2);
+  const along = Math.sin(elevAngle) * dist;      // offset along the orbit axis
+  const planeR = Math.cos(elevAngle) * dist;      // radius of the circle in the other two axes
+  const c = controls.target;
+  const cx = Math.cos(angle) * planeR, sx = Math.sin(angle) * planeR;
+  let pos;
+  if (axis === "X") pos = [c.x + along, c.y + cx, c.z + sx];
+  else if (axis === "Z") pos = [c.x + cx, c.y + sx, c.z + along];
+  else pos = [c.x + cx, c.y + along, c.z + sx];   // Y, the default "turntable" axis
+  return { pos };
+}
+
 function driveCamera() {
-  if (!$("camDrive").checked || CAMKEYS.length === 0) return;
-  const s = sampleCam(playhead);
+  if (camMode === "manual") return;
+  if (camMode === "keyframes") {
+    if (CAMKEYS.length === 0) return;
+    const s = sampleCam(playhead);
+    camera.position.set(...s.pos);
+    controls.target.set(...s.tgt);
+    if (s.fov !== camera.fov) { camera.fov = s.fov; camera.updateProjectionMatrix(); }
+    camera.lookAt(controls.target);
+    return;
+  }
+  // orbit
+  const s = sampleOrbit(playhead);
   camera.position.set(...s.pos);
-  controls.target.set(...s.tgt);
-  if (s.fov !== camera.fov) { camera.fov = s.fov; camera.updateProjectionMatrix(); }
   camera.lookAt(controls.target);
 }
+
+function setCamMode(mode) {
+  camMode = mode;
+  for (const b of document.querySelectorAll("#camModeBtns button")) {
+    b.classList.toggle("on", b.dataset.mode === mode);
+  }
+  $("camKeyBtns").style.display = mode === "manual" ? "none" : "";
+  $("camKeyCount").style.display = mode === "keyframes" ? "" : "none";
+  $("camRow").style.display = mode === "keyframes" ? "" : "none";
+  $("camOrbitRows").style.display = mode === "orbit" ? "" : "none";
+  pushUniforms();
+}
+for (const b of document.querySelectorAll("#camModeBtns button")) {
+  b.onclick = () => setCamMode(b.dataset.mode);
+}
+setCamMode(camMode);
 
 /* Camera row — a strip of ticks independent of whichever parameter is
    focused, so camera keys are never confused with a parameter's own
@@ -2354,6 +2470,20 @@ $("render").onclick = async () => {
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
 
+    /* Pre-existing gap, found while testing Phase 5 (not something it
+       introduced — Keyframes mode reproduces it identically): exporting
+       immediately after a load, with no intervening interactive render,
+       produced a near-empty file (~4 KB for a 48-frame clip) rather than an
+       error — the same "renders as nothing for a frame or two" generator
+       warm-up documented elsewhere in NOTES, just never hit here because
+       every previous export test in this project's history had already
+       warmed the scene up through unrelated interactive probing first. A
+       real user hitting Render right after Load test asset would not have.
+       One settle before the frame loop starts fixes it — cheap, and the
+       loop's own per-frame settle already proves this pattern works. */
+    await spark.update({ scene, camera });
+    renderer.render(scene, camera);
+
     for (let i = 0; i < total; i++) {
       playhead = total > 1 ? i / (total - 1) : 0;
       pushUniforms();
@@ -2427,8 +2557,8 @@ const PRESET_VERSION = 5;   // v2 selects; v3 audio; v4 regions+mask; v5 camera 
 /* `mobileMode` is deliberately absent: it is a property of the device you are
    sitting at, not of the look. A preset saved on a desktop must not force a
    phone back to full pixel ratio, nor the reverse. */
-const TOGGLES = ["camDrive", "useLod"];
-const SELECTS = ["res", "fps"];
+const TOGGLES = ["useLod"];
+const SELECTS = ["res", "fps", "obAxis"];
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 function serialize() {
@@ -2453,6 +2583,7 @@ function serialize() {
     camera: {
       keys: CAMKEYS.map((k) => ({ t: +k.t.toFixed(6), pos: k.pos, tgt: k.tgt, fov: k.fov })),
       smooth: camSmooth,
+      mode: camMode,
     },
     envelopes: envs,
     /* Property of the capture, not the workspace — unlike Mobile profile,
@@ -2489,6 +2620,13 @@ function applyPreset(o) {
   if (o.version > PRESET_VERSION) {
     throw new Error(`preset version ${o.version} is newer than this build (${PRESET_VERSION})`);
   }
+
+  /* Exit Correct mode FIRST, before any restoration below. leaveCorrect()
+     itself calls setCamMode() to restore whatever mode was active before
+     Correct was entered — doing that AFTER this function has already
+     restored the preset's own camera.mode would silently clobber it with
+     stale pre-Correct state instead. Order matters here, not just presence. */
+  if (correcting) leaveCorrect();
 
   for (const [id, digits] of SPEC) {
     const v = o.params?.[id];
@@ -2672,11 +2810,17 @@ function applyPreset(o) {
   $("camSmooth").classList.toggle("on", camSmooth);
   refreshCamUI();
 
+  /* v4-and-earlier presets have no `camera.mode` at all (the mode select is
+     new in v5) — default to "keyframes", matching what the old `camDrive`
+     checkbox defaulted to and what driveCamera() actually did with an old
+     preset's A/B pair before this phase existed. */
+  const modeIn = o.camera?.mode;
+  setCamMode(["manual", "keyframes", "orbit"].includes(modeIn) ? modeIn : "keyframes");
+
   /* Additive, no version bump: a preset with no transform block takes
      XFORM_DEFAULT, which reproduces the pre-Phase-2 hardcoded Y-flip
      exactly. A preset WITH one is clamped field-by-field against its own
      slider's range, same as every other preset value. */
-  if (correcting) leaveCorrect();
   const t = o.transform;
   xform = t && typeof t === "object"
     ? {
@@ -3003,6 +3147,9 @@ if (new URLSearchParams(location.search).has("debug")) {
     get CAMKEYS(){ return CAMKEYS; },
     get camSmooth(){ return camSmooth; },
     sampleCam,
+    sampleOrbit,
+    get camMode(){ return camMode; },
+    setCamMode,
     addCamKey,
     removeCamKeyAtPlayhead,
     xctl,

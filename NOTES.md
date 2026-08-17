@@ -231,6 +231,114 @@ deferred behind a timer.
 
 ---
 
+## Camera drive mode — Manual / Keyframes / Orbit
+
+Roadmap Phase 5 of `DEV_PLAN.md`. Replaces the `camDrive` checkbox with an
+explicit three-way mode, `camMode: "manual" | "keyframes" | "orbit"`. The
+checkbox already caused one real bug (`Go A` silently overwritten, fixed in an
+earlier phase) precisely because two things — a boolean and a keyframe list —
+both partly decided whether something owned the camera. A single string with
+exactly three values, switched once in `driveCamera()`, makes "two drivers
+write the camera in one frame" structurally impossible rather than merely
+unlikely: there is only one branch any given frame can take, by construction,
+not by care.
+
+### Orbit — reads `controls.target` live, never writes it
+
+`obAxis` (X/Y/Z), `obTurns` (±3, signed — negative reverses), `obPhase`
+(0..1 start angle), `obElev` (−1..1), `obDist` (multiple of `radius`) are all
+real `SPEC` entries in group `camera`, so they animate, reset, and persist for
+free like everything else. Orbit centres on whatever `controls.target`
+currently is and only ever moves `camera.position` — never the target — so
+"frame a subject, then switch to Orbit" does what it looks like it should, and
+Orbit never fights whatever last set the target (a drag, `Reframe`, a loaded
+capture).
+
+`obDist`'s "neutral" value is inherently tied to the CURRENT framing — unlike
+every other `SPEC` default, there is no single constant right for every
+capture. `reframe()` recomputes what "default" means every time it runs (on
+load, on a transform commit, on `Reframe`), but only overwrites the *live*
+slider value if the user has not already moved it away from its old default —
+silently discarding a deliberate `obDist` customisation because an unrelated
+Correct-mode edit was committed would be a worse surprise than a slider not
+tracking a reframe it had no reason to care about. Verified both directions:
+a custom `obDist` survives an intervening reframe unchanged, and the reset
+button correctly restores to *that* reframe's computed default, not a stale
+one from a previous capture or window size.
+
+### Measured: each axis holds its own coordinate exactly constant
+
+At the default elevation (0), sampling 100 points across a full revolution:
+
+| `obAxis` | spread on the chosen axis | spread on the other two |
+|---|---|---|
+| X | **0.000000** | 6.374 |
+| Y | **0.000000** | 6.374 |
+| Z | **0.000000** | 6.374 |
+
+Exact zero, not "small" — at `obElev = 0` the orbit-axis coordinate is
+algebraically `target[axis]` with no `t`-dependent term at all, so this isn't
+really a numerical-precision result, it's the formula doing what it says.
+
+`obTurns = 1` returns to the exact start position at `t = 1` (measured
+distance: `0.000000`, not just under the 0.1% bound). `obTurns = -1` traces
+the *same* set of points as `obTurns = 1` in reverse — verified pointwise,
+comparing `sampleOrbit(t)` at turns=−1 against `sampleOrbit(1−t)` at turns=+1
+across 21 samples: max pointwise difference `0.000000`.
+
+### A real bug found while testing this phase, not introduced by it
+
+The very first Orbit export produced a **3990-byte** file for a 48-frame
+1280×720 clip — visibly broken. Traced it to the export loop itself, not to
+anything Orbit-specific: reproduced identically in **Keyframes** mode too, on
+a genuinely fresh load with no interactive probing beforehand. Every previous
+export test in this project's history (Phases 1 and 4) had incidentally
+warmed the scene up through unrelated `settled()`/`__probe()` calls before
+ever hitting Render — so the gap was real from the start and simply never
+exercised. The export loop set up its fixed-resolution render target and went
+straight into the frame loop with no warm-up render; the same "renders as
+nothing for a frame or two" generator-rebuild transient documented elsewhere
+in NOTES applied here too, just to the export's *first* frame specifically,
+producing a barely-there video instead of a wrong one. One `spark.update()` +
+`render()` before the frame loop starts fixed it — confirmed on the exact
+failing sequence (fresh load, immediate mode switch, immediate export, zero
+warm-up): **0.9 MB**, 48 real frames, verified via `ffprobe signalstats` with
+no two consecutive frames sharing identical luma.
+
+### Measured: Orbit export, wrap point
+
+Same `ffprobe signalstats` method already established for export verification.
+5-key-equivalent single-orbit export, `obTurns = 1`, 48 frames: no frozen
+frame pair anywhere, mean frame-to-frame luma delta 0.34, and the wrap
+(`t = 0` vs `t = 1`, which `obTurns = 1` puts at the same physical position)
+differs by **0.001** — visually and numerically seamless, no discontinuity.
+
+### Exclusivity — structural, and separately exercised
+
+Clicking each of the three mode buttons leaves exactly one `.on`; entering
+Correct mode force-sets `manual` (so the gizmo never fights an auto-driven
+camera) and restores whatever mode was active on exit — verified `orbit ->
+manual (entering Correct) -> orbit (leaving)`. One subtlety caught before it
+shipped: `applyPreset()`'s own restoration of a saved `camera.mode` has to run
+**before** `leaveCorrect()` is called (not after) if a preset happens to be
+loaded while Correct mode is open — `leaveCorrect()` itself calls
+`setCamMode()` to restore the *pre-Correct* mode, and if that ran after the
+preset's own mode restore it would silently clobber it. `leaveCorrect()` is
+now called at the very top of `applyPreset()`, before any other restoration
+begins, rather than being interleaved partway through.
+
+### Preset
+
+`camera.mode` joins `camera.{keys, smooth}` (no version bump — still v5,
+additive to the same sub-object). `obAxis` goes through the existing
+`SELECTS` mechanism, same as `rgShape`. A v4-or-earlier preset has no
+`camera.mode` at all; it defaults to `"keyframes"`, matching what the old
+`camDrive` checkbox defaulted to and what `driveCamera()` actually did with a
+migrated A/B pair before this phase existed. Byte-exact round-trip verified
+for `camMode` + all four orbit sliders together.
+
+---
+
 ## Camera keyframes
 
 Roadmap Phase 4 of `DEV_PLAN.md`. Replaces the fixed `key.A`/`key.B` pair with
