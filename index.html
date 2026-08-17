@@ -456,13 +456,15 @@
   </details>
 
   <details class="mod" data-group="colour">
-    <summary>Tint <em>rgb multiply</em><i class="gflag"></i></summary>
+    <summary>Colour <em>tint + saturation</em><i class="gflag"></i></summary>
     <div class="row"><label>R</label><output id="o-tR">—</output>
       <input type="range" id="p-tR" min="0" max="2" step="0.01" value="1"></div>
     <div class="row"><label>G</label><output id="o-tG">—</output>
       <input type="range" id="p-tG" min="0" max="2" step="0.01" value="1"></div>
     <div class="row"><label>B</label><output id="o-tB">—</output>
       <input type="range" id="p-tB" min="0" max="2" step="0.01" value="1"></div>
+    <div class="row"><label>Saturation</label><output id="o-sat">—</output>
+      <input type="range" id="p-sat" min="0" max="2" step="0.01" value="1"></div>
   </details>
 
   <details class="mod" data-group="output" open>
@@ -677,11 +679,18 @@ const U = {
   dSpd:    F(0.3),
   dRnd:    F(1),
   tint:    dyno.dynoVec3(new THREE.Vector3(1, 1, 1)),
+  sat:     F(1),
 };
 
 const _consts = {};
 const c = (x) => (_consts[x] ??= dyno.dynoConst("float", x));
 const ONE3 = dyno.dynoConst("vec3", new THREE.Vector3(1, 1, 1));
+/* Rec.709 luma weights. These are defined for LINEAR light, but the values in
+   this graph are display-referred (measured: a 0.5x multiply produces a 0.5x
+   change in the 8-bit output). So this is the gamma-incorrect grayscale that
+   most image editors also do by default. Deliberate — matching editor
+   behaviour beats photometric correctness for a look tool. See NOTES. */
+const LUMA = dyno.dynoConst("vec3", new THREE.Vector3(0.2126, 0.7152, 0.0722));
 
 function buildModifier() {
   return dyno.dynoBlock({ gsplat: Gsplat }, { gsplat: Gsplat }, ({ gsplat }) => {
@@ -710,7 +719,20 @@ function buildModifier() {
     scales = dyno.mul(scales, dyno.mul(U.sizeMul, dyno.mix(c(1), vis, U.revK)));
 
     /* --- colour + alpha ------------------------------------------------ */
-    const rgb = dyno.mul(dyno.swizzle(rgba0, "xyz"), U.tint);
+    let rgb = dyno.mul(dyno.swizzle(rgba0, "xyz"), U.tint);
+
+    /* --- saturation: lerp between luma-grey and the tinted colour -------
+       dyno.mix(vec3, vec3, float) was listed as unverified in NOTES. It was
+       checked against the explicit `grey + (rgb - grey) * sat` arithmetic
+       before being used here: bit-identical output across sat 0/0.5/1/1.5/2
+       over 97,707 pixels. The form is confirmed — see NOTES.
+
+       Not clamped. Splat rasterisation blends, so clamping per-splat is not
+       the same as clamping the frame, and channels pushed past the ends are a
+       legitimate look. The framebuffer clamps on write regardless, which is
+       what makes response non-linear above sat = 1 — again, see NOTES. */
+    const grey = dyno.mul(ONE3, dyno.dot(rgb, LUMA));
+    rgb = dyno.mix(grey, rgb, U.sat);
     const alpha0 = dyno.swizzle(rgba0, "w");
     let alpha = dyno.mul(alpha0, vis);
 
@@ -750,6 +772,7 @@ const SPEC = [
   ["dAmt", 3, "displace"], ["dFrq", 2, "displace"],
   ["dSpd", 2, "displace"], ["dRnd", 2, "displace"],
   ["tR", 2, "colour"], ["tG", 2, "colour"], ["tB", 2, "colour"],
+  ["sat", 2, "colour"],
   ["br", 0, "output"], ["settle", 0, "output"], ["dpr", 2, "viewport"],
 ];
 
@@ -1453,6 +1476,7 @@ function pushUniforms() {
   U.dSpd.value    = V.dSpd;
   U.dRnd.value    = V.dRnd;
   U.tint.value.set(V.tR, V.tG, V.tB);
+  U.sat.value     = V.sat;
 
   /* Spark gates the generate pass on `viewChanged || version changed`
      (spark.module.js 2.1.0, ~line 10210). Writing a dyno uniform's .value
@@ -2219,6 +2243,8 @@ if (new URLSearchParams(location.search).has("debug")) {
     get P()    { return P; },
     get ENV()  { return ENV; },
     get audio(){ return audioEl; },
+    get dyno() { return dyno; },          // for verifying stdlib call forms
+    get U()    { return U; },
     get gest() { return GEST; },
     draw() {
       pushUniforms();

@@ -585,6 +585,87 @@ behind `?debug=1`.
 
 ---
 
+## Saturation
+
+`sat` lerps between luma-grey and the tinted colour, after the tint multiply,
+range 0..2 default 1. It lives in `SPEC` group `colour`, so it inherited reset,
+envelopes, audio routing and presets with no extra work.
+
+### `dyno.mix(vec3, vec3, float)` is CONFIRMED
+
+This form was listed above as assumed-but-unverified. It has now been checked
+by implementing saturation twice — once as explicit
+`grey + (rgb - grey) * sat`, once as `dyno.mix(grey, rgb, U.sat)` — and
+measuring both over a fixed 97,707-pixel mask:
+
+| sat | 0 | 0.5 | 1 | 1.5 | 2 |
+|---|---|---|---|---|---|
+| worst channel difference | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 |
+
+Bit-identical. `mix` is used in the effect chain and the arithmetic form was
+discarded. `dyno.dot(vec3, vec3)` is confirmed by the same test.
+
+### The colour in the graph is display-referred, not linear
+
+`renderer.outputColorSpace` is `srgb`, which would normally imply the shader
+works in linear light and three converts on output. **It does not behave that
+way here.** Measured: halving the red tint takes the mean red from 87.41 to
+43.89 — a ratio of **0.5021**. If the graph were linear and the output
+sRGB-encoded, that ratio would be ~0.73.
+
+So no encoding step sits between the dyno graph and `readPixels`. The Rec.709
+weights `(0.2126, 0.7152, 0.0722)` are defined for linear light, so applying
+them here is the *gamma-incorrect* grayscale — which is also what most image
+editors do by default. Kept deliberately: matching editor behaviour beats
+photometric correctness for a look tool. If a future Spark release starts
+applying an output transform, this measurement is the one that will change,
+and the luma path is where it will show up first.
+
+### Response is linear below sat = 1 and clamped above it
+
+The acceptance criterion "channel spread at least doubles from sat 1 to sat 2"
+measured **×1.89**, not ×2. That is not an arithmetic fault. Over a fixed
+mask, predicting each channel as `grey + sat × (mean1 − grey)`:
+
+| sat | 0 | 0.25 | 0.5 | 0.75 | 1 | 1.25 | 1.5 | 2 |
+|---|---|---|---|---|---|---|---|---|
+| B error vs prediction | 0.00% | 0.50% | 0.90% | 0.83% | 0.00% | 3.89% | 9.32% | 23.25% |
+| mask pixels with B ≤ 1 | 0 | 0 | 0 | 0 | 207 | 302 | 344 | 686 |
+
+The error tracks the floored-pixel count exactly. Above `sat = 1` the lerp
+pushes channels below zero and the 8-bit framebuffer clamps them on write, so
+the composite stops being linear in `sat`. Below 1 it is linear to within
+measurement noise. **Not clamping in the shader does not prevent the
+framebuffer from clamping** — that is inherent, and the ×1.89 is the correct
+consequence of it.
+
+### Measured
+
+| | |
+|---|---|
+| `sat = 0` | channels within **0.07%** of each other — clean monochrome |
+| `sat = 1` | R 87.41 vs 87.40 pre-change — neutral, within 0.01% |
+| `sat = 2` | spread 26.83 → 50.67 (×1.89, clamp-limited as above) |
+| frame time | **below the measurement floor** — see below |
+
+Frame time could not be resolved in this environment. `performance.now()` is
+coarsened to 100µs, `EXT_disjoint_timer_query_webgl2` needs a polling loop that
+a hidden tab clamps to 1s per iteration, and the app's own FPS counter is
+driven by rAF, which a hidden tab stops entirely. The change is four vector ALU
+ops per splat; no instrument available here can see it. Recorded as unresolved
+rather than passed.
+
+### Testing hazard: an empty mask fakes a pass
+
+The first `mix` comparison reported "worst difference 0.000 — VERDICT: WORKS"
+while every measured value was `NaN`. The mask had been captured during the
+load transient, so it was empty, every mean divided by zero, and `NaN`
+comparisons silently evaluated false in the `Math.max` accumulator. **Assert
+the mask is non-empty and every value finite before comparing.** A pass built
+on NaN looks exactly like a real pass.
+
+---
+
 ## Section accordion and `SPEC` groups
 
 `SPEC` entries are `[id, digits, group]`. The group ties a parameter to its rail
@@ -795,8 +876,8 @@ Confirmed at runtime on the butterfly (177,132 gaussians), 2026-08-16:
 
 - `dyno.split(scales).outputs.x/.y/.z` — the code deliberately uses three
   `swizzle()` calls instead, so this remains unverified.
-- `dyno.mix()` with a `vec3` a/b and a scalar `t`. Both current `mix()` call
-  sites pass floats, so the vec3 form is still untested.
+- ~~`dyno.mix()` with a `vec3` a/b and a scalar `t`.~~ **Confirmed** — see the
+  Saturation section. `dyno.dot(vec3, vec3)` confirmed by the same test.
 
 Splat captures are usually Y-down relative to three.js, hence
 `mesh.quaternion.set(1, 0, 0, 0)` after load.
