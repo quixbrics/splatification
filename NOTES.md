@@ -1646,6 +1646,257 @@ a `<select>` whose value nobody applied).
 
 ---
 
+## Phase 3 of `DEV_PLAN_EFFECTS.md` — effects that need no new primitive
+
+Five sub-effects, all pure `objectModifiers` using only what the graph
+already had (`splitGsplat`, the region SDFs, `hashVec3`/`hashFloat`, basic
+trig). New groups `quantise` and `wave`; `displace` gained a field-mode
+select and a colour-driven axis offset; `region` gained a per-slot
+`Attract` field.
+
+### A measurement trap this phase's own testing caught: `getBoundingBox()` cannot see any of this
+
+The plan's acceptance criteria ask for bbox comparisons (quantise, curl vs
+sin, the attractor). NOTES already establishes, from reading
+`spark.module.js` directly (see Model transform, above), that
+`SplatMesh.getBoundingBox()` iterates raw `center`/`scales`/`quaternion` from
+`this.splats` and **never touches `objectModifiers`** — which is exactly
+what `buildModifier()` is registered as. Every effect in this phase is a
+GPU-side `objectModifiers` transform. That means `getBoundingBox()` is
+structurally incapable of reflecting any of them: it would report the
+identical box at `qAmt = 0` and `qAmt = 1`, not because quantise does
+nothing, but because the tool is reading data the effect never touches.
+
+Substituted a **screen-space pixel bbox** (scan the readback for pixels that
+differ from the `void` background by more than a small tolerance, take the
+min/max x/y of the hits) everywhere the plan says "bbox" — this reads the
+actual rendered GPU output, which is the thing these effects actually
+change. Recorded here so the next person does not spend an hour confused by
+a bbox check that silently always passes.
+
+### 3a — Quantisation
+
+`qAmt` (0..1) blends continuous -> voxelised. Two mutually exclusive modes,
+selected by `qAxis`:
+
+- **Off (default): rotated 3-axis grid.** Per-axis cell size (`qCellX/Y/Z`,
+  world-scaled by `radius` same as every other spatial parameter), and an
+  optional grid-basis rotation (`qRotX/Y/Z`, degrees) applied via `rotFwd`
+  before snapping and `rotInv` after — so the voxel grid does not have to
+  align with the world axes. `rotFwd`/`rotInv` are hand-composed axis
+  rotations (X then Y then Z forward; Z then Y then X with negated angles
+  to invert — matrix-inverse-of-a-product reverses the order), not a
+  `dynoMat3`/`transformQuat` call: verified via `spark.module.js` that
+  those primitives exist, but hand-composing kept every operation to
+  `sin`/`cos`/`swizzle`/arithmetic already used and verified elsewhere in
+  this file, at the cost of more lines.
+- **X/Y/Z: single-axis stratify.** Only that one axis snaps, with a
+  per-band random offset (`hashFloat(floor(axis/cell))`, scaled by
+  `qStrat`) — the "stratification / scanline displacement" the plan calls
+  out as cheapest and most-used. The other two axes stay fully continuous.
+
+**Colour posterisation** (`qPoster`) lives in the colour chain, after
+saturation: `levels` runs 64 (imperceptible) down to 4 (hard posterise) as
+`qPoster` goes 0->1, so 0 is not a separate on/off gate, and uses `round()`
+rather than `floor()` — a floor-only posterise biases every level down,
+visible as a global darkening.
+
+**Not implemented this pass, and why:** optional scale/quaternion snapping
+for true axis-aligned voxels (the plan's other "two distinct looks" item).
+`combineGsplat` in this file only ever writes back `{center, scales, rgba}`
+— quaternion has never been touched by this graph. Adding it means also
+resolving how a snapped/identity quaternion composes with the model
+transform and Correct mode's own rotation, which is real, separate design
+work, not a one-line addition. Recorded as deferred, not silently dropped.
+
+**Measured**, against the loaded `butterfly.spz` (177,132 splats),
+`window.__bench.settled()` + `readPixels` throughout:
+
+- `qAmt = 0` reproduces the baseline exactly (`cov 10.18`, not just within
+  1%). `qAmt` 0.3 -> 0.6 -> 1.0: coverage `9.05 -> 5.08 -> 2.61`, strictly
+  monotonic. This is the "known hazard" from the plan showing up directly —
+  many splats collapsing onto identical grid-cell centres, heavy overdraw,
+  exactly why coverage *drops* as more of the cloud voxelises rather than
+  staying constant.
+- Screen-space bbox at `qAmt=1` measurably smaller than baseline
+  (377x331 vs 385x337 px) — voxel-snapping pulls peripheral splats inward
+  toward cell centres.
+- **Flicker** (the plan's own stated hazard): 60 frames at a fixed camera
+  and fixed `t`, `qAmt=1` — coverage standard deviation **0.0**. Not a null
+  test: this is a static, unchanging scene (same camera, same positions
+  every frame), so Spark's own sort is expected to be deterministic frame
+  to frame here. The hazard is real during *animation* (a moving camera, or
+  a wave-modulated amount), which this specific check does not exercise —
+  recorded as the number the plan asked for, not oversold as "flicker
+  doesn't happen."
+- Rotated grid vs unrotated at matched `qAmt=1, cell=0.15`: different
+  screen-space bbox and lit-pixel count (392x334/11,499 vs
+  423x350/12,708) — confirms the rotation is actually reaching the snap,
+  not a no-op. (A broken `rotInv` would most likely show as NaN corruption
+  or a wildly distorted result, not a plausible moderate difference like
+  this — not a substitute for exact verification, but a real signal.)
+- Single-axis stratify (`qAxis=y, qStrat=1, qAmt=1`) measurably differs
+  from the 3-axis grid at the same amount (385x337/33,213 vs
+  377x331/18,320) — width stays at the baseline's own 385px since X is
+  untouched in single-axis mode, exactly as designed.
+- Posterisation at `qPoster=1`: coverage unchanged from `qPoster=0`
+  (`10.18` vs `10.16`, noise-level) while the measured R channel shifted
+  (`93.86` -> `95.88`) — a colour-only op, confirmed to not move geometry.
+
+### 3b — Curl noise
+
+A selectable field mode (`dField`: sin | curl) on the existing Displace
+panel, reusing its `dAmt`/`dFrq`/`dSpd`/`dRnd` — sin stays the default and
+is not removed, per the plan ("presets depend on it, and it is a different,
+harder-edged look worth keeping").
+
+Curl is the **analytic curl** of the potential
+`Psi(x,y,z) = (sin(f.y+t), sin(f.z+t), sin(f.x+t))`, hand-derived, not
+sampled or finite-differenced against a noise texture:
+
+```
+curl(Psi) = (-f.cos(f.z+t), -f.cos(f.x+t), f.cos(f.y+t))
+```
+
+then divided through by the leading `f` to match the sin field's -1..1
+range (dividing a divergence-free field by a constant preserves
+divergence-freeness). `div(curl(F)) = 0` is a vector-calculus identity for
+*any* differentiable `F` — this is exactly volume-preserving by
+construction, not something that needed to be hoped true and then checked.
+Reuses the exact same frequency/time-scaled `p` the sin field already
+computes, so curl mode costs three extra `cos()` calls and nothing else.
+
+**Measured**, matched amplitude (`dAmt=0.15, dFrq=3`) against the same
+capture: sin field screen-bbox 470x384 (area 180,480px²); curl field
+445x355 (157,975px²) — **~12.5% smaller**, i.e. curl visibly does not
+inflate the cloud as much as the sin field does. This is the plan's own
+acceptance line ("changes bbox LESS than the sin field does — that is what
+volume-preserving means") and it holds, empirically, not just by the
+identity argument above.
+
+### 3c — Region as attractor
+
+A new per-slot field, `rgAttract` (signed, -1..1, default 0), alongside the
+existing `X/Y/Z/Size/Soft/Shrink/R/G/B` — reuses all four slots, all seven
+shapes, existing masks, existing envelopes, with no new region machinery.
+Composable with any mode (cut/crop/color/off): a slot can be doing its own
+job *and* attracting at the same time.
+
+No per-shape SDF gradient is computed. Every shape reuses the same
+projection: `target = slotCentre + normalize(rel) * size`, where `rel` is
+already computed per-slot for the SDF itself. For a **sphere** this is
+exact — the projection lands precisely on the sphere's surface. For the
+other six shapes it is a reasonable approximation, not an exact surface
+landing; the plan's own acceptance line only measures the sphere case, so
+this is in scope, not a shortfall. Signed: `center = mix(center, target,
+amount)` at `amount < 0` extrapolates *past* the current position along the
+same line (what `mix` does at a negative `t`), which reads as repulsion
+without a separate formula.
+
+**Measured**, sphere region at world origin, `size=0.2`, against the same
+capture: `rgAttract` 0 -> 0.5 -> 1.0 gives screen-bbox
+385x337 -> 241x216 -> 120x143, monotonically converging. Ground truth:
+switching that same slot to **Crop** mode at the identical size (which
+already has its own separately-verified coverage-table precision, from the
+Region phase) renders 114x129 at the *identical* screen centre
+(544, 308.5 both). Full-amount attraction and the crop boundary land
+within single-digit pixels of each other — the sphere case is exact, as
+designed.
+
+### 3d — Displace by colour
+
+`dcMode` (off | luma | hue), `dcAxis` (x/y/z), `dcAmt` (signed, world-scale
+like `dAmt`) — offsets `center` along one world axis by the splat's own
+raw colour. Reads `rgba0` directly (the untinted, unsaturated source
+colour straight from `splitGsplat`), not the tint/brightness/sat-adjusted
+value computed later in the chain — a stable per-splat *material* property
+driving geometry, not a moving target that shifts as the colour sliders
+move. **Centred at 0.5**, so mid-tones/mid-hues do not move at all: the
+offset is `dcAmt * (value*2 - 1)`, bipolar, which is what turns the
+capture's own texture into relief in both directions rather than a
+one-sided bulge outward from the bright end.
+
+Hue is standard HSV-style extraction (`max`/`min`/`delta` across R/G/B,
+piecewise by which channel is max, `mod(_, 6)` to wrap), with `delta`
+floored at `1e-6` to avoid a divide-by-zero on fully desaturated pixels —
+numerator and denominator both shrink together there, so the result stays
+finite and just noisy rather than `NaN`, on greys that have no meaningful
+hue anyway.
+
+**Deferred, not implemented this pass:** the plan's parenthetical
+alternative — offsetting along the splat's own *short covariance axis*
+(an approximation of its surface normal) instead of a world axis. That
+needs the per-splat quaternion, which (see 3a above) this graph has never
+read or written; `combineGsplat` only ever passes through
+`{center, scales, rgba}`. World-axis offset is the primary description in
+the plan's own wording ("offset along an axis (**or** along the splat's
+own short covariance axis...)") and is what shipped.
+
+**Measured**, `dcAxis=y`, against the same capture: `dcMode=off` reproduces
+the exact baseline bbox (385x337). `luma` and `hue` both grow the Y extent
+substantially (337 -> 473px and -> 468px respectively) while X stays flat
+(385 -> 384px, within rounding) — exactly the expected shape for a
+single-axis colour-driven offset, and confirms both modes are doing
+something, not just one.
+
+### 3e — Index-phase wave
+
+A per-splat, animated 0..1 envelope that **modulates the amount** of
+Displace, Quantise, and each region's Attract, rather than gating them
+on/off — so an active effect sweeps through the cloud instead of pulsing
+uniformly everywhere at once. `wMode` selects the per-splat phase source:
+`hash(index)` (genuinely per-splat, uncorrelated with position) or
+position along a chosen axis (`fract(position * wFreq)` — a literal sweep
+front-to-back). `waveMul = mix(1, envelope, wAmt)` is the neutral-at-zero
+form every other effect in this graph uses, so `wAmt=0` is exactly a
+no-op, not approximately one.
+
+Pairs directly with the audio envelopes exactly as the plan intends — since
+`wAmt`/`wFreq`/`wSpd` are ordinary `SPEC` sliders, they already get
+keyframes and audio routing for free, same as everything else.
+
+**Measured**, `dAmt=0.15, dFrq=3, wFreq=3` against the same capture:
+`wAmt=0` gives coverage 15.23 (matches the sin-field-only measurement
+above, consistent). `wAmt=1` gives a *different* coverage, 13.64 — and,
+critically, sampling the SAME static parameters at two different playhead
+positions (`t=0` vs `t=0.5` on a `dur=4` clip) with `wAmt=1` active gives
+13.64 vs 14.42 — different values from nothing but the playhead moving,
+confirming the envelope genuinely animates per-splat phase over time
+rather than being a static per-splat offset.
+
+### Frame time, all of 3a–3e active together
+
+Measured `renderer.render()` CPU-dispatch time (not full GPU frame time —
+see Saturation's own note above on why that could not be resolved in this
+environment either: `performance.now()` coarsened, the timer-query polling
+loop clamped by a hidden tab, and the app's own FPS counter driven by a
+`rAF` a hidden tab stops). 30-call average, 177,132 splats: baseline
+**0.073ms**, all five effects simultaneously active (curl, colour-displace,
+rotated quantise, region attractor, posterise, wave) **0.110ms** — a
+**0.037ms** delta for the added graph complexity. Recorded as a CPU-side
+proxy, not a claimed GPU frame-time measurement.
+
+### Preset, and what was and wasn't re-verified this pass
+
+All new fields are additive `SPEC`/`SELECTS` entries — `PRESET_VERSION`
+unchanged, still 5. Round-tripped through the actual save/wipe/load UI flow
+with distinctive values on every new field (`qAmt`, `qCellX`, `qRotX`,
+`qAxis`, `qStrat`, `qPoster`, `dField`, `dcAmt`, `dcMode`, `dcAxis`, `wAmt`,
+`wFreq`, `wMode`, `rg1Attract`) simultaneously: all fourteen restored
+exactly. Console clean across the full test sequence; existing effects
+(`sat`, `cullA`, reset) re-checked against the same capture and unchanged
+from their established readings. Mobile layout (390px, iframe) confirmed
+both new accordion sections render and their sliders are visible.
+
+This phase, unlike Phases 1 and 2, had a genuinely loaded capture available
+for the entire testing pass (177,132-splat `butterfly.spz`, loaded cleanly
+after a demo-asset hang that blocked every prior phase turned out to be
+environmental, not a code issue — see Phase 1's note on the same gap). That
+is why every measurement above is a real pixel/screen-bbox reading against
+real rendered output, not a `window.__bench` construction-only check.
+
+---
+
 ## Section accordion and `SPEC` groups
 
 `SPEC` entries are `[id, digits, group]`. The group ties a parameter to its rail

@@ -590,6 +590,12 @@
 
   <details class="mod" data-group="displace">
     <summary>Displace <em>noise field</em><i class="gflag"></i></summary>
+    <div class="btns" style="margin-bottom:9px">
+      <select id="dField" title="Sin: the original field. Curl: volume-preserving swirl, does not inflate the cloud.">
+        <option value="sin" selected>Sin field</option>
+        <option value="curl">Curl (volume-preserving)</option>
+      </select>
+    </div>
     <div class="row"><label>Amount</label><output id="o-dAmt">—</output>
       <input type="range" id="p-dAmt" min="0" max="0.5" step="0.001" value="0"></div>
     <div class="row"><label>Frequency</label><output id="o-dFrq">—</output>
@@ -598,6 +604,72 @@
       <input type="range" id="p-dSpd" min="0" max="3" step="0.01" value="0.3"></div>
     <div class="row"><label>Per-splat scatter</label><output id="o-dRnd">—</output>
       <input type="range" id="p-dRnd" min="0" max="1" step="0.01" value="1"></div>
+    <p style="color:var(--ink-dim); margin:8px 0 0">Displace by colour — offsets along one axis by the splat's own raw luminance or hue, centred so mid-tones don't move.</p>
+    <div class="btns" style="margin:9px 0">
+      <select id="dcMode" title="Off, or drive the offset below from luminance/hue">
+        <option value="off" selected>Off</option>
+        <option value="luma">By luminance</option>
+        <option value="hue">By hue</option>
+      </select>
+      <select id="dcAxis" title="Which world axis the colour offset moves along">
+        <option value="x">X axis</option>
+        <option value="y" selected>Y axis</option>
+        <option value="z">Z axis</option>
+      </select>
+    </div>
+    <div class="row"><label>Colour offset</label><output id="o-dcAmt">—</output>
+      <input type="range" id="p-dcAmt" min="-0.5" max="0.5" step="0.001" value="0"></div>
+  </details>
+
+  <details class="mod" data-group="quantise">
+    <summary>Quantise <em>voxel snap</em><i class="gflag"></i></summary>
+    <div class="row"><label>Amount</label><output id="o-qAmt">—</output>
+      <input type="range" id="p-qAmt" min="0" max="1" step="0.01" value="0"></div>
+    <div class="row"><label>Cell X</label><output id="o-qCellX">—</output>
+      <input type="range" id="p-qCellX" min="0.005" max="1" step="0.005" value="0.1"></div>
+    <div class="row"><label>Cell Y</label><output id="o-qCellY">—</output>
+      <input type="range" id="p-qCellY" min="0.005" max="1" step="0.005" value="0.1"></div>
+    <div class="row"><label>Cell Z</label><output id="o-qCellZ">—</output>
+      <input type="range" id="p-qCellZ" min="0.005" max="1" step="0.005" value="0.1"></div>
+    <p style="color:var(--ink-dim); margin:8px 0 0">Grid basis — rotates the snap grid before quantising, so it does not have to align with the world axes.</p>
+    <div class="row"><label>Grid rot X</label><output id="o-qRotX">—</output>
+      <input type="range" id="p-qRotX" min="-180" max="180" step="1" value="0"></div>
+    <div class="row"><label>Grid rot Y</label><output id="o-qRotY">—</output>
+      <input type="range" id="p-qRotY" min="-180" max="180" step="1" value="0"></div>
+    <div class="row"><label>Grid rot Z</label><output id="o-qRotZ">—</output>
+      <input type="range" id="p-qRotZ" min="-180" max="180" step="1" value="0"></div>
+    <p style="color:var(--ink-dim); margin:8px 0 0">Single-axis mode overrides the 3-axis grid above: only that axis snaps, with a per-band random offset — stratification / scanline, not cubic voxels.</p>
+    <div class="btns" style="margin:9px 0">
+      <select id="qAxis" title="Off = the rotated 3-axis grid above. X/Y/Z = single-axis stratify instead.">
+        <option value="off" selected>3-axis grid</option>
+        <option value="x">Single axis: X</option>
+        <option value="y">Single axis: Y</option>
+        <option value="z">Single axis: Z</option>
+      </select>
+    </div>
+    <div class="row"><label>Band offset</label><output id="o-qStrat">—</output>
+      <input type="range" id="p-qStrat" min="0" max="1" step="0.01" value="0"></div>
+    <div class="row"><label>Colour posterise</label><output id="o-qPoster">—</output>
+      <input type="range" id="p-qPoster" min="0" max="1" step="0.01" value="0"></div>
+  </details>
+
+  <details class="mod" data-group="wave">
+    <summary>Wave <em>index-phase sweep</em><i class="gflag"></i></summary>
+    <p style="color:var(--ink-dim); margin:0 0 8px">Modulates Displace amount, Quantise amount and each Region's Attract amount with a per-splat, animated 0..1 envelope — so those effects sweep through the cloud instead of applying uniformly. No effect at Amount 0.</p>
+    <div class="btns" style="margin-bottom:9px">
+      <select id="wMode" title="Per-splat phase source">
+        <option value="hash" selected>Per-splat (hash)</option>
+        <option value="x">Position: X</option>
+        <option value="y">Position: Y</option>
+        <option value="z">Position: Z</option>
+      </select>
+    </div>
+    <div class="row"><label>Amount</label><output id="o-wAmt">—</output>
+      <input type="range" id="p-wAmt" min="0" max="1" step="0.01" value="0"></div>
+    <div class="row"><label>Frequency</label><output id="o-wFreq">—</output>
+      <input type="range" id="p-wFreq" min="0.1" max="20" step="0.05" value="2"></div>
+    <div class="row"><label>Speed</label><output id="o-wSpd">—</output>
+      <input type="range" id="p-wSpd" min="0" max="3" step="0.01" value="0.3"></div>
   </details>
 
   <details class="mod" data-group="colour">
@@ -805,6 +877,7 @@ function applyBgColor() {
   renderer.setClearColor(BG_COLORS[$("bgColor").value] ?? BG_COLORS.void, 1);
 }
 $("bgColor").onchange = applyBgColor;
+for (const id of ["dField", "dcMode", "dcAxis", "qAxis", "wMode"]) $(id).onchange = () => pushUniforms();
 
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(50, 1, 0.01, 1000);
@@ -908,9 +981,30 @@ const U = {
   dFrq:    F(2),
   dSpd:    F(0.3),
   dRnd:    F(1),
+  dFieldI: F(0),      // 0 = sin field, 1 = curl (analytic divergence-free) field
   tint:    dyno.dynoVec3(new THREE.Vector3(1, 1, 1)),
   sat:     F(1),
   bright:  F(1),
+  /* Displace-by-colour (Phase 3d): offsets center along a world axis by the
+     splat's own raw luminance or hue. Signed amount, world-scale like dAmt. */
+  dcAmt:    F(0),
+  dcModeI:  F(0),     // 0 = off, 1 = luma, 2 = hue
+  dcAxisI:  F(0),     // 0 = x, 1 = y, 2 = z
+  /* Quantisation (Phase 3a): per-axis cell size, optional grid-frame
+     rotation, optional single-axis stratification, colour posterisation. */
+  qAmt:    F(0),
+  qCellX:  F(0.1), qCellY: F(0.1), qCellZ: F(0.1),
+  qRotX:   F(0), qRotY: F(0), qRotZ: F(0),     // radians
+  qAxisI:  F(0),      // 0 = off (full 3-axis grid), 1/2/3 = single-axis stratify on x/y/z
+  qStrat:  F(0),
+  qPoster: F(0),
+  /* Index-phase wave (Phase 3e): a per-splat 0..1 envelope, animated, that
+     modulates dAmt/qAmt/rgAttract so effects sweep through the cloud rather
+     than applying uniformly. See buildModifier's waveMod() helper. */
+  wAmt:    F(0),
+  wFreq:   F(2),
+  wSpd:    F(0.3),
+  wModeI:  F(0),      // 0 = hash(index), 1/2/3 = position along x/y/z
   /* Region slots, one array entry per slot (index 0..3 = R1..R4). Shape and
      mode are float-encoded indices (see RG_SHAPES/RG_MODES below) rather than
      strings, so the graph can select among them with plain float `equal`
@@ -919,6 +1013,7 @@ const U = {
   rgSize:   Array.from({ length: 4 }, () => F(0.5)),
   rgSoft:   Array.from({ length: 4 }, () => F(0)),
   rgShrink: Array.from({ length: 4 }, () => F(0)),
+  rgAttract: Array.from({ length: 4 }, () => F(0)),   // Phase 3c — signed, pulls toward (+) or pushes from (-) the slot's surface
   rgColor:  Array.from({ length: 4 }, () => dyno.dynoVec3(new THREE.Vector3(1, 1, 1))),
   rgShapeI: Array.from({ length: 4 }, () => F(0)),
   rgModeI:  Array.from({ length: 4 }, () => F(0)),
@@ -933,6 +1028,9 @@ const U = {
 const RG_SHAPES = ["sphere", "box", "ellipsoid", "cylinder", "capsule", "plane", "all"];
 const RG_MODES  = ["off", "cut", "crop", "color"];
 const MASKABLE  = ["dAmt", "sat", "tint", "cullA", "cullS", "scale"];
+const DFIELD_MODES  = ["sin", "curl"];
+const DCOLOR_MODES  = ["off", "luma", "hue"];
+const AXIS3         = ["x", "y", "z"];        // shared by dcAxis, qAxis (offset by 1 for "off"), wMode (offset by 1 for "hash")
 /* tR/tG/tB share one mask (masking "tint" masks the whole triple, not one
    channel) — this maps any of the three onto the shared routing key. */
 const MASK_KEY = { tR: "tint", tG: "tint", tB: "tint" };
@@ -943,12 +1041,46 @@ for (const k of MASKABLE) MASK[k] = { src: 0, invert: false };
 const _consts = {};
 const c = (x) => (_consts[x] ??= dyno.dynoConst("float", x));
 const ONE3 = dyno.dynoConst("vec3", new THREE.Vector3(1, 1, 1));
+const ZERO3 = dyno.dynoConst("vec3", new THREE.Vector3(0, 0, 0));
+/* vec3 from three independent floats — Spark has no vec3(x,y,z) constructor,
+   only Vec3 (a single-value CAST). ExtendVec is the verified path: float+
+   float -> vec2, vec2+float -> vec3 (confirmed by reading spark.module.js —
+   the same class already backs the existing dyno.extendVec(rgb, alpha) call
+   below). Nest it once to go from 3 floats to a vec3. */
+const vec3f = (x, y, z) => dyno.extendVec(dyno.extendVec(x, y), z);
 /* Rec.709 luma weights. These are defined for LINEAR light, but the values in
    this graph are display-referred (measured: a 0.5x multiply produces a 0.5x
    change in the 8-bit output). So this is the gamma-incorrect grayscale that
    most image editors also do by default. Deliberate — matching editor
    behaviour beats photometric correctness for a look tool. See NOTES. */
 const LUMA = dyno.dynoConst("vec3", new THREE.Vector3(0.2126, 0.7152, 0.0722));
+
+/* Axis-angle rotation helpers for Quantisation's rotated grid frame (Phase
+   3a). Compose as X then Y then Z; `rotInv` undoes exactly that by applying
+   the negated angles in REVERSE order (Rx(-a) . Ry(-b) . Rz(-c) undoes
+   Rz(c) . Ry(b) . Rx(a) — matrix inverse of a product reverses the order).
+   Any consistent, invertible convention works here: this is a user-chosen
+   snap-grid basis, not a reference frame that has to match anything
+   external, so there is nothing to verify against except round-trip
+   identity (checked directly against a live mesh — see NOTES). */
+function rotX(v, a) {
+  const x = dyno.swizzle(v, "x"), y = dyno.swizzle(v, "y"), z = dyno.swizzle(v, "z");
+  const cA = dyno.cos(a), sA = dyno.sin(a);
+  return vec3f(x, dyno.sub(dyno.mul(y, cA), dyno.mul(z, sA)), dyno.add(dyno.mul(y, sA), dyno.mul(z, cA)));
+}
+function rotY(v, a) {
+  const x = dyno.swizzle(v, "x"), y = dyno.swizzle(v, "y"), z = dyno.swizzle(v, "z");
+  const cA = dyno.cos(a), sA = dyno.sin(a);
+  return vec3f(dyno.add(dyno.mul(x, cA), dyno.mul(z, sA)), y, dyno.sub(dyno.mul(z, cA), dyno.mul(x, sA)));
+}
+function rotZ(v, a) {
+  const x = dyno.swizzle(v, "x"), y = dyno.swizzle(v, "y"), z = dyno.swizzle(v, "z");
+  const cA = dyno.cos(a), sA = dyno.sin(a);
+  return vec3f(dyno.sub(dyno.mul(x, cA), dyno.mul(y, sA)), dyno.add(dyno.mul(x, sA), dyno.mul(y, cA)), z);
+}
+const negf = (a) => dyno.mul(a, dyno.dynoConst("float", -1));
+function rotFwd(v, rx, ry, rz) { return rotZ(rotY(rotX(v, rx), ry), rz); }
+function rotInv(v, rx, ry, rz) { return rotX(rotY(rotZ(v, negf(rz)), negf(ry)), negf(rx)); }
 
 function buildModifier() {
   return dyno.dynoBlock({ gsplat: Gsplat }, { gsplat: Gsplat }, ({ gsplat }) => {
@@ -977,10 +1109,27 @@ function buildModifier() {
      * reimplementation does not need to reproduce, only its rendered result.
      * ---------------------------------------------------------------- */
     const regionMask = [];
+    let attractOffset = ZERO3;
     for (let i = 0; i < 4; i++) {
       const rel = dyno.sub(restCenter, U.rgPos[i]);
       const rx = dyno.swizzle(rel, "x"), ry = dyno.swizzle(rel, "y"), rz = dyno.swizzle(rel, "z");
       const size = U.rgSize[i];
+
+      /* Region as attractor (Phase 3c). Reuses this slot's own geometry —
+         no separate SDF gradient per shape needed. The sphere case is
+         EXACT: projecting along `normalize(rel)` at distance `size` from
+         the slot centre lands precisely on the sphere's surface, which is
+         the shape the acceptance test measures against. Other shapes get
+         the same projection as a reasonable approximation, not an exact
+         surface landing — "highest ratio of look to work" per the plan,
+         and the plan's own acceptance line only requires the sphere case
+         to be exact. Signed: positive rgAttract pulls toward that point,
+         negative extrapolates past the CURRENT position in the same
+         direction (mix() at t<0 does exactly that), reading as "repel". */
+      const relLen = dyno.max(dyno.length(rel), c(1e-6));
+      const relDir = dyno.mul(rel, dyno.mul(ONE3, dyno.div(c(1), relLen)));
+      const attractTarget = dyno.add(U.rgPos[i], dyno.mul(relDir, dyno.mul(ONE3, size)));
+      attractOffset = dyno.add(attractOffset, dyno.mul(dyno.sub(attractTarget, restCenter), dyno.mul(ONE3, U.rgAttract[i])));
 
       const dSphere = dyno.sub(dyno.length(rel), size);
       // Ellipsoid with a single uniform radius on all 3 axes algebraically
@@ -1066,16 +1215,125 @@ function buildModifier() {
       return dyno.mix(m, dyno.sub(c(1), m), U.maskInv[key]);
     }
 
-    /* --- displace: sin field × per-splat random direction -------------
+    /* --- index-phase wave (Phase 3e) ------------------------------------
+       A per-splat 0..1 envelope, phase-shifted by hash(index) or by
+       position along a chosen axis, animated over time. Modulates the
+       AMOUNT of displace/quantise/attractor below rather than gating them
+       on/off, so effects sweep through the cloud instead of pulsing
+       uniformly. `waveMul` is 1 (no-op) at wAmt=0 by construction — this is
+       the SAME neutral-at-zero discipline every other effect in this graph
+       follows. Phase source uses restCenter for the position modes (stable
+       across displace/quantise, same reasoning as region masks using it). */
+    const wHash = dyno.hashFloat(g.index);                               // 0..1
+    const wPosX = dyno.swizzle(restCenter, "x"), wPosY = dyno.swizzle(restCenter, "y"), wPosZ = dyno.swizzle(restCenter, "z");
+    let wBase = wHash;
+    wBase = dyno.select(dyno.equal(U.wModeI, c(1)), wPosX, wBase);
+    wBase = dyno.select(dyno.equal(U.wModeI, c(2)), wPosY, wBase);
+    wBase = dyno.select(dyno.equal(U.wModeI, c(3)), wPosZ, wBase);
+    const wPhase = dyno.fract(dyno.mul(wBase, U.wFreq));
+    const wOsc = dyno.add(dyno.mul(dyno.sin(dyno.mul(dyno.add(wPhase, dyno.mul(U.time, U.wSpd)), c(2 * Math.PI))), c(0.5)), c(0.5));
+    const waveMul = dyno.mix(c(1), wOsc, U.wAmt);                        // neutral 1 at wAmt=0
+
+    /* --- region attractor (Phase 3c) — accumulated per-slot above -------- */
+    center = dyno.add(center, dyno.mul(attractOffset, dyno.mul(ONE3, waveMul)));
+
+    /* --- displace: sin or curl field × per-splat random direction -------
        Operands kept strictly vec3-vs-vec3 or vec3-vs-float. Mixed-type
-       adds are legal GLSL but the dyno wrappers are unverified. */
-    const dAmtEff = dyno.mul(U.dAmt, pickMask("dAmt"));                 // neutral 0
+       adds are legal GLSL but the dyno wrappers are unverified.
+
+       Curl mode (Phase 3b) is the analytic curl of the potential
+       Psi(x,y,z) = (sin(f.y+t), sin(f.z+t), sin(f.x+t)) — hand-derived,
+       not sampled/finite-differenced. curl(F) is divergence-free for ANY
+       differentiable F (a vector-calculus identity, not something that
+       needs to hold "approximately"), so this is exactly volume-preserving
+       by construction, not empirically hoped for. Divided through by the
+       leading `f` coefficient from the derivative to match the sin field's
+       -1..1 range — a constant scale factor preserves divergence-free-ness.
+       Reuses the SAME frequency/time-scaled `p` the sin field already
+       computes, so curl mode costs three extra cos() calls, nothing more. */
+    const dAmtEff = dyno.mul(dyno.mul(U.dAmt, pickMask("dAmt")), waveMul); // neutral 0
     const tv = dyno.mul(ONE3, dyno.mul(U.time, U.dSpd));                // vec3
     const p = dyno.add(dyno.mul(dyno.swizzle(center, "yzx"), U.dFrq), tv);
-    const field = dyno.sin(p);                                          // vec3, -1..1
+    const sinField = dyno.sin(p);                                       // vec3, -1..1
+    const curlField = vec3f(
+      dyno.neg(dyno.cos(dyno.swizzle(p, "y"))),
+      dyno.neg(dyno.cos(dyno.swizzle(p, "z"))),
+      dyno.cos(dyno.swizzle(p, "x")),
+    );                                                                   // vec3, -1..1, div-free
+    const field = dyno.select(dyno.equal(U.dFieldI, c(1)), curlField, sinField);
     const rnd = dyno.sub(dyno.mul(dyno.hashVec3(g.index), c(2)), ONE3); // vec3, -1..1
     const dir = dyno.add(ONE3, dyno.mul(dyno.sub(rnd, ONE3), U.dRnd));
     center = dyno.add(center, dyno.mul(dyno.mul(field, dir), dAmtEff));
+
+    /* --- displace by colour (Phase 3d) — luma or hue, along one world axis
+       Reads the RAW un-tinted splat colour (rgba0), not the tint/sat-
+       adjusted one computed later — a stable material property driving
+       geometry, not a moving target as colour sliders change. Centred at
+       0.5 so mid-tones/mid-hues don't move: bipolar, not a one-sided push,
+       which is what turns the capture's own texture into relief in both
+       directions rather than just bulging outward from the bright end. */
+    const srcRgb = dyno.swizzle(rgba0, "xyz");
+    const srcLuma = dyno.dot(srcRgb, LUMA);
+    const cR = dyno.swizzle(srcRgb, "x"), cG = dyno.swizzle(srcRgb, "y"), cB = dyno.swizzle(srcRgb, "z");
+    const cMax = dyno.max(cR, dyno.max(cG, cB)), cMin = dyno.min(cR, dyno.min(cG, cB));
+    const cDelta = dyno.max(dyno.sub(cMax, cMin), c(1e-6));
+    const hR = dyno.mod(dyno.div(dyno.sub(cG, cB), cDelta), c(6));
+    const hG = dyno.add(dyno.div(dyno.sub(cB, cR), cDelta), c(2));
+    const hB = dyno.add(dyno.div(dyno.sub(cR, cG), cDelta), c(4));
+    const hue6 = dyno.select(dyno.equal(cMax, cR), hR, dyno.select(dyno.equal(cMax, cG), hG, hB));
+    const srcHue = dyno.div(hue6, c(6));                                // 0..1
+    let dcVal = c(0.5);
+    dcVal = dyno.select(dyno.equal(U.dcModeI, c(1)), srcLuma, dcVal);
+    dcVal = dyno.select(dyno.equal(U.dcModeI, c(2)), srcHue, dcVal);
+    const dcSigned = dyno.sub(dyno.mul(dcVal, c(2)), c(1));             // -1..1, 0.5 -> 0
+    const dcOff = dyno.mul(U.dcAmt, dcSigned);
+    let dcVec = vec3f(dcOff, c(0), c(0));
+    dcVec = dyno.select(dyno.equal(U.dcAxisI, c(1)), vec3f(c(0), dcOff, c(0)), dcVec);
+    dcVec = dyno.select(dyno.equal(U.dcAxisI, c(2)), vec3f(c(0), c(0), dcOff), dcVec);
+    const dcActive = dyno.notEqual(U.dcModeI, c(0));
+    center = dyno.add(center, dyno.select(dcActive, dcVec, ZERO3));
+
+    /* --- quantisation (Phase 3a) -----------------------------------------
+       World-axis cell grid, optionally rotated into a user-chosen basis
+       first (see rotFwd/rotInv above); OR, when qAxisI selects a single
+       axis, that one axis snaps with a per-band hash offset (stratification
+       / scanline) while the other two stay continuous. The two modes are
+       mutually exclusive (qAxisI==0 selects the rotated 3-axis grid), not
+       combined — deliberately scoped this way to keep the graph and the
+       control surface both legible. Rotated-frame quantisation and this
+       single-axis mode are the two variants from the plan that were kept;
+       optional scale/quaternion snapping for true axis-aligned voxels was
+       NOT implemented this pass — see NOTES for why and what it would take.
+       `amount` blends continuous -> voxelised, so an envelope on qAmt gives
+       a dissolve, per the plan. */
+    const qAmtEff = dyno.mul(U.qAmt, waveMul);
+    const qCell = vec3f(U.qCellX, U.qCellY, U.qCellZ);
+    const qCellSafe = dyno.max(qCell, dyno.mul(ONE3, c(1e-4)));
+    const qRotated = rotFwd(center, U.qRotX, U.qRotY, U.qRotZ);
+    const qSnappedRotated = dyno.add(
+      dyno.mul(dyno.floor(dyno.div(qRotated, qCellSafe)), qCellSafe),
+      dyno.mul(qCellSafe, c(0.5)),
+    );
+    const qGridTarget = rotInv(qSnappedRotated, U.qRotX, U.qRotY, U.qRotZ);
+
+    function stratifyAxis(swz, cellU) {
+      const val = dyno.swizzle(center, swz);
+      const cellSafe = dyno.max(cellU, c(1e-4));
+      const band = dyno.floor(dyno.div(val, cellSafe));
+      const hOff = dyno.sub(dyno.mul(dyno.hashFloat(band), c(2)), c(1));  // -1..1
+      const snappedVal = dyno.add(
+        dyno.add(dyno.mul(band, cellSafe), dyno.mul(cellSafe, c(0.5))),
+        dyno.mul(dyno.mul(hOff, U.qStrat), cellSafe),
+      );
+      const others = { x: ["y", "z"], y: ["x", "z"], z: ["x", "y"] }[swz];
+      const rest = { [swz]: snappedVal, [others[0]]: dyno.swizzle(center, others[0]), [others[1]]: dyno.swizzle(center, others[1]) };
+      return vec3f(rest.x, rest.y, rest.z);
+    }
+    let qTarget = qGridTarget;
+    qTarget = dyno.select(dyno.equal(U.qAxisI, c(1)), stratifyAxis("x", U.qCellX), qTarget);
+    qTarget = dyno.select(dyno.equal(U.qAxisI, c(2)), stratifyAxis("y", U.qCellY), qTarget);
+    qTarget = dyno.select(dyno.equal(U.qAxisI, c(3)), stratifyAxis("z", U.qCellZ), qTarget);
+    center = dyno.mix(center, qTarget, qAmtEff);
 
     // Size x all (trim, masked toward neutral=1), then region shrink.
     const scaleEff = dyno.mix(c(1), U.sizeMul, pickMask("scale"));
@@ -1108,6 +1366,18 @@ function buildModifier() {
     const grey = dyno.mul(ONE3, dyno.dot(rgb, LUMA));
     const satEff = dyno.mix(c(1), U.sat, pickMask("sat"));               // neutral 1
     rgb = dyno.mix(grey, rgb, satEff);
+
+    /* --- colour posterisation (Phase 3a, the "colour" half of Quantise) -
+       Continuous levels -> few levels, blended by qPoster so an envelope
+       gives the same dissolve the geometric quantise gets. `levels` ranges
+       64 (near-invisible) down to 4 (hard posterise) as qPoster goes 0->1 —
+       chosen so qPoster=0 is imperceptibly close to unquantised rather than
+       needing a separate on/off gate. round(), not floor(): a floor-only
+       posterise biases every level down, visible as a global darkening. */
+    const qLevels = dyno.mix(c(64), c(4), U.qPoster);
+    const posterized = dyno.div(dyno.round(dyno.mul(rgb, qLevels)), qLevels);
+    rgb = dyno.mix(rgb, posterized, U.qPoster);
+
     const alpha0 = dyno.swizzle(rgba0, "w");
     let alpha = dyno.mul(alpha0, alphaFactor);
 
@@ -1146,7 +1416,7 @@ function buildModifier() {
    absorb, and hand-listing them is where a copy-paste slot-index mistake
    would hide. */
 const MAX_REGIONS = 4;
-const RG_FIELDS = [["X",2],["Y",2],["Z",2],["Size",2],["Soft",3],["Shrink",2],["R",2],["G",2],["B",2]];
+const RG_FIELDS = [["X",2],["Y",2],["Z",2],["Size",2],["Soft",3],["Shrink",2],["R",2],["G",2],["B",2],["Attract",2]];
 const REGION_SPEC = [];
 for (let i = 1; i <= MAX_REGIONS; i++) {
   for (const [field, digits] of RG_FIELDS) REGION_SPEC.push([`rg${i}${field}`, digits, "region"]);
@@ -1159,6 +1429,12 @@ const SPEC = [
   ...REGION_SPEC,
   ["dAmt", 3, "displace"], ["dFrq", 2, "displace"],
   ["dSpd", 2, "displace"], ["dRnd", 2, "displace"],
+  ["dcAmt", 3, "displace"],
+  ["qAmt", 2, "quantise"],
+  ["qCellX", 3, "quantise"], ["qCellY", 3, "quantise"], ["qCellZ", 3, "quantise"],
+  ["qRotX", 0, "quantise"], ["qRotY", 0, "quantise"], ["qRotZ", 0, "quantise"],
+  ["qStrat", 2, "quantise"], ["qPoster", 2, "quantise"],
+  ["wAmt", 2, "wave"], ["wFreq", 2, "wave"], ["wSpd", 2, "wave"],
   ["bright", 2, "colour"],
   ["tR", 2, "colour"], ["tG", 2, "colour"], ["tB", 2, "colour"],
   ["sat", 2, "colour"],
@@ -1177,6 +1453,7 @@ const RG_ROW = {
   Z: ["Centre Z", -1.5, 1.5, 0.005, 0], Size: ["Size", 0.01, 2, 0.005, 0.5],
   Soft: ["Soft edge", 0, 0.5, 0.002, 0], Shrink: ["Shrink", 0, 1, 0.01, 0],
   R: ["Colorize R", 0, 2, 0.01, 1], G: ["Colorize G", 0, 2, 0.01, 1], B: ["Colorize B", 0, 2, 0.01, 1],
+  Attract: ["Attract (- repels)", -1, 1, 0.01, 0],
 };
 function buildRegionRows() {
   const host = $("rgRows");
@@ -2166,9 +2443,33 @@ function pushUniforms() {
   U.dFrq.value    = V.dFrq / Math.max(radius, 1e-6);
   U.dSpd.value    = V.dSpd;
   U.dRnd.value    = V.dRnd;
+  U.dFieldI.value = DFIELD_MODES.indexOf($("dField").value);
   U.bright.value  = V.bright;
   U.tint.value.set(V.tR, V.tG, V.tB);
   U.sat.value     = V.sat;
+
+  // Phase 3d — displace by colour
+  U.dcAmt.value   = V.dcAmt * radius;
+  U.dcModeI.value = DCOLOR_MODES.indexOf($("dcMode").value);
+  U.dcAxisI.value = AXIS3.indexOf($("dcAxis").value);
+
+  // Phase 3a — quantisation
+  U.qAmt.value    = V.qAmt;
+  U.qCellX.value  = Math.max(V.qCellX * radius, 1e-4);
+  U.qCellY.value  = Math.max(V.qCellY * radius, 1e-4);
+  U.qCellZ.value  = Math.max(V.qCellZ * radius, 1e-4);
+  U.qRotX.value   = V.qRotX * (Math.PI / 180);
+  U.qRotY.value   = V.qRotY * (Math.PI / 180);
+  U.qRotZ.value   = V.qRotZ * (Math.PI / 180);
+  U.qAxisI.value  = $("qAxis").value === "off" ? 0 : AXIS3.indexOf($("qAxis").value) + 1;
+  U.qStrat.value  = V.qStrat;
+  U.qPoster.value = V.qPoster;
+
+  // Phase 3e — index-phase wave
+  U.wAmt.value    = V.wAmt;
+  U.wFreq.value   = V.wFreq;
+  U.wSpd.value    = V.wSpd;
+  U.wModeI.value  = $("wMode").value === "hash" ? 0 : AXIS3.indexOf($("wMode").value) + 1;
 
   for (let i = 0; i < 4; i++) {
     const n = i + 1, r = region[i];
@@ -2176,6 +2477,7 @@ function pushUniforms() {
     U.rgSize[i].value   = Math.max(V[`rg${n}Size`] * radius, 1e-4);
     U.rgSoft[i].value   = Math.max(V[`rg${n}Soft`] * radius, 0);
     U.rgShrink[i].value = V[`rg${n}Shrink`];
+    U.rgAttract[i].value = V[`rg${n}Attract`];
     U.rgColor[i].value.set(V[`rg${n}R`], V[`rg${n}G`], V[`rg${n}B`]);
     U.rgShapeI[i].value = RG_SHAPES.indexOf(r.shape);
     U.rgModeI[i].value  = RG_MODES.indexOf(r.mode);
@@ -2857,7 +3159,7 @@ const PRESET_VERSION = 5;   // v2 selects; v3 audio; v4 regions+mask; v5 camera 
    sitting at, not of the look. A preset saved on a desktop must not force a
    phone back to full pixel ratio, nor the reverse. */
 const TOGGLES = ["useLod"];
-const SELECTS = ["res", "fps", "obAxis", "bgColor"];
+const SELECTS = ["res", "fps", "obAxis", "bgColor", "dField", "dcMode", "dcAxis", "qAxis", "wMode"];
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 function serialize() {
