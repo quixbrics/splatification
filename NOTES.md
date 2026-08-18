@@ -337,6 +337,105 @@ additive to the same sub-object). `obAxis` goes through the existing
 migrated A/B pair before this phase existed. Byte-exact round-trip verified
 for `camMode` + all four orbit sliders together.
 
+### Phase 1 of `DEV_PLAN_EFFECTS.md` — evaluate on playhead change, not per frame
+
+The mode select above fixed "two drivers write the camera in one frame" but
+introduced a worse bug: `driveCamera()` was called **unconditionally, every
+render-loop tick**, regardless of whether anything was playing. With exactly
+one camera key, `sampleCam(t)` is constant at every `t`, so the camera was
+overwritten back to that one pose on the very next frame after any manual
+orbit drag — permanently pinning it, with no way to move the camera to author
+a second key. Same shape as the original `Go A`/`Go B` bug, in a new form: the
+guarantee that made playback correct (exactly one writer) also made authoring
+impossible (that writer never yields).
+
+**The fix splits evaluation from ownership.** `evaluateCamera(t)` is now a
+pure function — reads `camMode`/`CAMKEYS`/`controls.target`, writes nothing,
+returns `{pos, tgt?, fov?}` or `null`. `driveCamera(t = playhead)` is the
+*only* function that writes `camera.position` / `controls.target` / `fov` for
+the drive system (reframe() and the one-time constructor default are the only
+other writers, and are deliberately separate — see below). It is called only
+on discrete events, not every tick:
+
+- **Playback**, every frame, from inside `frame()`'s `if (playing)` branch —
+  continuous driving is correct there, nothing has changed.
+- **`setPlayhead()`** — the single funnel for scrub, lane clicks, and camera-
+  key-tick jumps, so all of those now re-assert the curve/orbit at the new
+  position.
+- **`setCamMode()`** — force-writes on every mode change, so switching to
+  Keyframes or Orbit while paused snaps immediately instead of doing nothing
+  until the next scrub.
+- **`reframe()`** — re-asserts Keyframes/Orbit against the newly-computed
+  framing rather than leaving reframe's own bounding-sphere pose stuck (In
+  Manual mode `driveCamera()` no-ops, so a manual reframe correctly sticks).
+- **The export loop** — force-writes every frame unconditionally, same as
+  before, so frame 0 is never skipped by a playhead that has not "changed".
+
+Paused and idle, in every mode, manual orbit input now simply works: move the
+camera, `Add key`, scrub, move again, `Add key`. That is the whole fix. This
+is how every keyframe tool behaves and does **not** reintroduce two drivers —
+there is still exactly one writer, it just fires on an event instead of every
+frame. **Do not "fix" this back to a per-frame call** — that reintroduces the
+exact bug this phase removes.
+
+One write path is down from six sites to four: the one-time constructor
+default (`camera.position.set(0,0,3)`, never called again), `reframe()`'s two
+writes (a deliberately separate, user/load-triggered "fit to bounding sphere"
+operation, not part of the automated drive system), and `driveCamera()`'s two
+writes (the sole writer for Manual/Keyframes/Orbit). The camera-key tick-click
+handler no longer writes the camera directly — ticks only render when
+`camMode === "keyframes"`, so `setPlayhead(k.t)`'s own `driveCamera()` call
+reproduces the exact key pose (Catmull-Rom interpolates through its own
+control points exactly at their own parameter), removing a fifth write site
+that duplicated `driveCamera()`'s logic.
+
+**Dirty-state indicator.** While paused, if the live camera differs from
+`evaluateCamera(playhead)` beyond a small relative epsilon (`radius × 0.002`),
+`#camDirty` shows "· off curve" in `--edit` violet next to the keyframe count
+— the same visual language as every other automation-vs-manual affordance in
+this file. `Add key` commits the deviation into a new/replaced key; scrubbing
+away discards it silently. Neither prompts.
+
+Verified via `window.__bench` (a loaded mesh is not required — camera/controls
+exist from boot):
+
+- **The core bug, directly**: one key at `t=0.5`, `setPlayhead(0.5)` (pins the
+  camera there), then a simulated manual move, then 60 paused `frame()`-style
+  ticks. Camera stayed exactly at the manual position across all 60 — this is
+  the assertion that would have failed before this phase (it would have
+  snapped back to the key pose on tick 2). `#camDirty` correctly showed dirty;
+  a subsequent `setPlayhead()` (scrub) discarded it silently, as designed.
+- **3-key authoring end to end**, no mode-select touches: add key at t=0,
+  move, add at t=0.5 (dirty for 30 simulated paused frames first, proving it
+  doesn't drift back), move, add at t=1. All three keys distinct and correct.
+- **Scrub with 3 keys**: `camera.position` after `setPlayhead(0.25)` and
+  `setPlayhead(0.75)` matched `evaluateCamera(t)` to full float precision —
+  no drift between the driven camera and the pure evaluator.
+- **Mode-change force-write**: faked a manual drift, switched Orbit while
+  paused — camera snapped to `evaluateCamera(0.5)` immediately, matching to
+  full precision, no wait for a scrub.
+- **Regressions, all previously-measured, re-run and matching:** `obTurns=1`
+  returns to start at distance `6.4e-16` (effectively 0.000000, same as
+  before); `obTurns=-1` pointwise identical to `+1` reversed, max diff
+  `6.4e-16`; 5-key smoothness max/mean ratio ≤ 3× at `ease` 0/0.8/1 in both
+  `camSmooth` states (max measured 2.27×, at ease=1 curved); 48-frame
+  keyframe export and 48-frame orbit export both show zero frozen frame
+  pairs (`driveCamera(t)` called per synthetic frame, positions diffed
+  pairwise); orbit wrap (`t=0` vs `t=1` at `obTurns=1`) differs by `6.4e-16`.
+- Console clean across the full sequence (mode switches, scrubs, key
+  add/remove) — no new exceptions.
+
+**Not independently re-verified this pass, and why:** Correct mode's
+force-set-Manual-on-entry/restore-on-exit needs a loaded `mesh`
+(`enterCorrect()` early-returns without one), and the demo asset load hung in
+this session's browser environment — reproduced identically on the
+pre-Phase-1 committed build via `git stash`, so it is environmental, not a
+regression. `setCamMode()`'s force-write (the only change touching that path)
+was verified directly and does not depend on `mesh`, so the risk here is low,
+but this is a real gap, not a claimed pass — re-run the Correct-mode
+entry/exit check (`orbit -> manual -> orbit`, verifying `driveCamera()` fires
+on both transitions) the next time a splat loads cleanly.
+
 ---
 
 ## Camera keyframes

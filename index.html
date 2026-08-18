@@ -237,6 +237,8 @@
   .rst:focus-visible{outline:1px solid var(--signal); outline-offset:1px}
   .rst.dirty{color:var(--edit); opacity:1}
   .rst.dirty:hover{color:var(--signal)}
+  #camDirty{color:var(--edit); display:none; margin-left:4px}
+  #camDirty.show{display:inline}
 
   input[type=range]{-webkit-appearance:none; appearance:none; background:transparent; height:14px; margin:0 0 3px}
   input[type=range]::-webkit-slider-runnable-track{height:1px; background:var(--rule)}
@@ -473,7 +475,8 @@
       <button id="camSmooth" title="Path shape between keyframes" class="on">Smooth</button>
     </div>
     <p style="color:var(--ink-dim); margin:8px 0" id="camKeyCount">
-      No camera keyframes — camera stays under manual orbit control.
+      <span id="camKeyCountText">No camera keyframes — camera stays under manual orbit control.</span>
+      <span id="camDirty" title="Orbit has moved the camera away from what the curve shows here — Add key to keep it, or scrub to discard it">· off curve</span>
     </p>
 
     <div id="camOrbitRows">
@@ -1676,6 +1679,7 @@ function setPlayhead(t) {
   refreshKeyBtns();
   audMeters();
   audioSeek();
+  driveCamera();       // scrub/lane-click/transport all funnel through here — see Phase 1 in NOTES
   drawLane();
   drawCamRow();
   drawSparkline();
@@ -2255,6 +2259,7 @@ function reframe() {
   }
 
   pushUniforms();
+  driveCamera();     // re-assert Keyframes/Orbit against the new framing rather than leaving the raw reframed pose stuck
 }
 
 $("pick").onclick = $("reload").onclick = () => $("file").click();
@@ -2419,21 +2424,53 @@ function sampleOrbit(t) {
   return { pos };
 }
 
-function driveCamera() {
-  if (camMode === "manual") return;
-  if (camMode === "keyframes") {
-    if (CAMKEYS.length === 0) return;
-    const s = sampleCam(playhead);
-    camera.position.set(...s.pos);
-    controls.target.set(...s.tgt);
-    if (s.fov !== camera.fov) { camera.fov = s.fov; camera.updateProjectionMatrix(); }
-    camera.lookAt(controls.target);
-    return;
-  }
-  // orbit
-  const s = sampleOrbit(playhead);
+/* Pure — reads camMode/CAMKEYS/controls.target, writes nothing. Returns
+   {pos, tgt?, fov?} for whatever the current mode would show at `t`, or null
+   if nothing is authored (Manual, or Keyframes with zero keys). Orbit never
+   returns `tgt` since it never owns the target — see sampleOrbit above. This
+   is the thing Phase 1 introduces: splitting "what WOULD the camera look
+   like here" from "write it", so dirty-state checks and one-off event writes
+   can both call the same evaluation without side effects piling up. */
+function evaluateCamera(t) {
+  if (camMode === "manual") return null;
+  if (camMode === "keyframes") return CAMKEYS.length === 0 ? null : sampleCam(t);
+  return sampleOrbit(t);
+}
+
+/* The ONLY code path that writes camera.position / controls.target /
+   camera.fov outside of OrbitControls' own drag handling and the dedicated,
+   user-triggered reframe(). Every trigger below calls this exact function —
+   there is no second writer to drift out of sync with it. Deliberately NOT
+   called every render-loop tick any more (that was the bug: it silently
+   overwrote manual orbit input on the very next frame, permanently pinning
+   the camera the moment one keyframe existed). It now fires only on:
+   playhead change (playback tick, scrub, or a camera-key tick jumping via
+   setPlayhead), camera mode change, Reframe, preset load, and every frame of
+   the export loop (which force-writes deliberately — see there). */
+function driveCamera(t = playhead) {
+  const s = evaluateCamera(t);
+  if (!s) return;
   camera.position.set(...s.pos);
+  if (s.tgt) controls.target.set(...s.tgt);
+  if (s.fov !== undefined && s.fov !== camera.fov) { camera.fov = s.fov; camera.updateProjectionMatrix(); }
   camera.lookAt(controls.target);
+}
+
+/* Dirty-state indicator: while paused, has manual orbit input moved the live
+   camera away from what the curve/orbit would show at this exact playhead?
+   Only meaningful when something is actually driving (evaluateCamera
+   returns non-null) — Manual mode has no curve to deviate from. Epsilon is
+   relative to the object's own scale, not a fixed world-unit constant, since
+   `radius` varies wildly between captures. */
+function updateCamDirty() {
+  const el = $("camDirty");
+  if (!el) return;
+  const ref = !playing && evaluateCamera(playhead);
+  if (!ref) { el.classList.remove("show"); return; }
+  const eps = Math.max(radius * 0.002, 1e-4);
+  const dPos = camera.position.distanceTo(new THREE.Vector3(...ref.pos));
+  const dTgt = ref.tgt ? controls.target.distanceTo(new THREE.Vector3(...ref.tgt)) : 0;
+  el.classList.toggle("show", dPos > eps || dTgt > eps);
 }
 
 function setCamMode(mode) {
@@ -2445,6 +2482,7 @@ function setCamMode(mode) {
   $("camKeyCount").style.display = mode === "keyframes" ? "" : "none";
   $("camRow").style.display = mode === "keyframes" ? "" : "none";
   $("camOrbitRows").style.display = mode === "orbit" ? "" : "none";
+  driveCamera();            // force-write: switching mode should snap to the curve immediately, not wait for a scrub
   pushUniforms();
 }
 for (const b of document.querySelectorAll("#camModeBtns button")) {
@@ -2474,11 +2512,7 @@ function drawCamRow() {
         if (i >= 0) { CAMKEYS.splice(i, 1); rebuildCamCurves(); refreshCamUI(); setStatus(`Camera key removed — ${CAMKEYS.length} left.`); }
         return;
       }
-      setPlayhead(k.t);
-      camera.position.set(...k.pos);
-      controls.target.set(...k.tgt);
-      if (k.fov !== camera.fov) { camera.fov = k.fov; camera.updateProjectionMatrix(); }
-      camera.lookAt(controls.target);
+      setPlayhead(k.t);   // drives the camera via evaluateCamera(k.t), which reproduces this exact key — ticks only show in Keyframes mode
     });
     row.appendChild(el);
   }
@@ -2486,7 +2520,7 @@ function drawCamRow() {
 
 function refreshCamUI() {
   const n = CAMKEYS.length;
-  $("camKeyCount").textContent = n
+  $("camKeyCountText").textContent = n
     ? `${n} camera keyframe${n === 1 ? "" : "s"}${n < 3 ? " — add a 3rd for a curved path" : ""}.`
     : "No camera keyframes — camera stays under manual orbit control.";
   drawCamRow();
@@ -2528,6 +2562,7 @@ function frame(now) {
     pushUniforms();
     updateClock();
     syncSliders();
+    driveCamera();      // playback drives every frame; paused frames do NOT — that was the bug (see Phase 1 in NOTES)
     drawCamRow();
     audMeters();
     drawLane();
@@ -2535,7 +2570,7 @@ function frame(now) {
   }
   fpsAvg = fpsAvg * 0.9 + (1 / Math.max(dt, 1e-4)) * 0.1;
   $("t-fps").textContent = fpsAvg.toFixed(0);
-  driveCamera();
+  updateCamDirty();
   controls.update();
   renderer.render(scene, camera);
 }
@@ -3380,10 +3415,15 @@ if (new URLSearchParams(location.search).has("debug")) {
     get camSmooth(){ return camSmooth; },
     sampleCam,
     sampleOrbit,
+    evaluateCamera,
+    driveCamera,
+    updateCamDirty,
+    setPlayhead,
     get camMode(){ return camMode; },
     setCamMode,
     addCamKey,
     removeCamKeyAtPlayhead,
+    reframe,
     xctl,
     pushUniforms,
     draw() {
