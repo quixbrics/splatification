@@ -672,6 +672,23 @@
       <input type="range" id="p-wSpd" min="0" max="3" step="0.01" value="0.3"></div>
   </details>
 
+  <details class="mod" data-group="depth">
+    <summary>Depth fade <em>aerial perspective</em><i class="gflag"></i></summary>
+    <p style="color:var(--ink-dim); margin:0 0 8px">Fades opacity and tints toward the current Background colour with distance — dissolves distant splats into the backdrop. No effect at Amount 0.</p>
+    <div class="btns" style="margin-bottom:9px">
+      <select id="dpMode" title="Planar: distance along the camera's view direction (a Z-depth). Radial: straight-line distance to the camera.">
+        <option value="planar" selected>Planar (view direction)</option>
+        <option value="radial">Radial (distance)</option>
+      </select>
+    </div>
+    <div class="row"><label>Amount</label><output id="o-dpAmt">—</output>
+      <input type="range" id="p-dpAmt" min="0" max="1" step="0.01" value="0"></div>
+    <div class="row"><label>Near</label><output id="o-dpNear">—</output>
+      <input type="range" id="p-dpNear" min="0" max="5" step="0.02" value="1"></div>
+    <div class="row"><label>Far</label><output id="o-dpFar">—</output>
+      <input type="range" id="p-dpFar" min="0" max="8" step="0.02" value="3"></div>
+  </details>
+
   <details class="mod" data-group="colour">
     <summary>Colour <em>tint + saturation</em><i class="gflag"></i></summary>
     <div class="row"><label>Brightness</label><output id="o-bright">—</output>
@@ -874,10 +891,26 @@ stage.appendChild(renderer.domElement);
    duration of any probe regardless of what the UI has selected. */
 const BG_COLORS = { void: 0x08090b, black: 0x000000, grey: 0x808080, white: 0xffffff, chroma: 0x00ff00 };
 function applyBgColor() {
-  renderer.setClearColor(BG_COLORS[$("bgColor").value] ?? BG_COLORS.void, 1);
+  const hex = BG_COLORS[$("bgColor").value] ?? BG_COLORS.void;
+  renderer.setClearColor(hex, 1);
+  /* Depth fade (Phase 4) fades toward whatever background is showing, so
+     the two stay in sync automatically rather than needing their own
+     separate colour control — see U.dpColor's own comment. Safe to
+     reference U here despite it being declared later in the file: this
+     function's body only runs from user interaction or a preset load, both
+     strictly after the whole module has finished executing top to bottom
+     — never during the module's own synchronous evaluation.
+
+     U.dpColor.value is a THREE.Vector3 (every dyno vec3 uniform in this
+     file is, not a THREE.Color — there is no .setHex() on it), so decode
+     through a throwaway Color first rather than assuming the wrapper has
+     colour-specific methods. */
+  const rgb = new THREE.Color(hex);
+  U.dpColor.value.set(rgb.r, rgb.g, rgb.b);
+  mesh?.updateVersion();
 }
 $("bgColor").onchange = applyBgColor;
-for (const id of ["dField", "dcMode", "dcAxis", "qAxis", "wMode"]) $(id).onchange = () => pushUniforms();
+for (const id of ["dField", "dcMode", "dcAxis", "qAxis", "wMode", "dpMode"]) $(id).onchange = () => pushUniforms();
 
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(50, 1, 0.01, 1000);
@@ -1005,6 +1038,26 @@ const U = {
   wFreq:   F(2),
   wSpd:    F(0.3),
   wModeI:  F(0),      // 0 = hash(index), 1/2/3 = position along x/y/z
+  /* Object-space camera (Phase 4 spike). Written every frame from a
+     dedicated narrow path (pushCameraUniform(), not the general
+     pushUniforms()) — see NOTES "Object-space camera uniform" for why.
+     camDirLocal is the camera's forward direction transformed into the
+     same local frame, normalised — needed for planar (dot-product) depth,
+     which radial (pure distance) does not use. */
+  camPosLocal: dyno.dynoVec3(new THREE.Vector3()),
+  camDirLocal: dyno.dynoVec3(new THREE.Vector3(0, 0, -1)),
+  /* Depth fade (Phase 4). Fades BOTH opacity and tint-toward-background
+     together, scaled by the same amount — the plan's "fade opacity or tint
+     toward a colour" implemented as one coherent aerial-perspective effect
+     rather than a second mode toggle. dpColor is synced to the CURRENT
+     background colour selection (applyBgColor(), Phase 2b), not a separate
+     control — distant splats dissolve into whatever backdrop is showing,
+     which is the standard fog-colour-matches-background convention and
+     needed no new UI. */
+  dpAmt:   F(0),
+  dpNear:  F(1), dpFar: F(3),
+  dpModeI: F(0),      // 0 = planar (dot with view direction), 1 = radial (distance)
+  dpColor: dyno.dynoVec3(new THREE.Vector3(8 / 255, 9 / 255, 11 / 255)),
   /* Region slots, one array entry per slot (index 0..3 = R1..R4). Shape and
      mode are float-encoded indices (see RG_SHAPES/RG_MODES below) rather than
      strings, so the graph can select among them with plain float `equal`
@@ -1400,6 +1453,27 @@ function buildModifier() {
     );
     alpha = dyno.select(keep, alpha, c(0));
 
+    /* --- depth fade (Phase 4) — the whole point of this phase's spike ---
+       Both `center` (fully displaced/quantised by this point — depth fade
+       reads the ACTUAL rendered position, not the rest one) and
+       camPosLocal are in the same object-space frame, so no extra
+       transform is needed here: the object-space camera uniform is what
+       makes this a one-line dot/length instead of a round trip through
+       world space per splat. Planar depth is distance along the camera's
+       own view axis (a Z-depth, what DoF will also want); radial is
+       straight-line distance to the camera point. Fades opacity AND tints
+       toward the background colour together, by the same amount — see
+       U.dpColor's own comment for why that needs no separate control. */
+    const toSplat = dyno.sub(center, U.camPosLocal);
+    const planarDepth = dyno.dot(toSplat, U.camDirLocal);
+    const radialDepth = dyno.length(toSplat);
+    const depth = dyno.select(dyno.equal(U.dpModeI, c(1)), radialDepth, planarDepth);
+    const dpSpan = dyno.max(dyno.sub(U.dpFar, U.dpNear), c(1e-4));
+    const dpT = dyno.clamp(dyno.div(dyno.sub(depth, U.dpNear), dpSpan), c(0), c(1));
+    const fadeAmt = dyno.mul(dpT, U.dpAmt);       // neutral 0 at dpAmt=0
+    rgb = dyno.mix(rgb, U.dpColor, fadeAmt);
+    alpha = dyno.mix(alpha, c(0), fadeAmt);
+
     const rgba = dyno.extendVec(rgb, alpha);
     return { gsplat: dyno.combineGsplat({ gsplat, center, scales, rgba }) };
   });
@@ -1435,6 +1509,7 @@ const SPEC = [
   ["qRotX", 0, "quantise"], ["qRotY", 0, "quantise"], ["qRotZ", 0, "quantise"],
   ["qStrat", 2, "quantise"], ["qPoster", 2, "quantise"],
   ["wAmt", 2, "wave"], ["wFreq", 2, "wave"], ["wSpd", 2, "wave"],
+  ["dpAmt", 2, "depth"], ["dpNear", 2, "depth"], ["dpFar", 2, "depth"],
   ["bright", 2, "colour"],
   ["tR", 2, "colour"], ["tG", 2, "colour"], ["tB", 2, "colour"],
   ["sat", 2, "colour"],
@@ -2471,6 +2546,13 @@ function pushUniforms() {
   U.wSpd.value    = V.wSpd;
   U.wModeI.value  = $("wMode").value === "hash" ? 0 : AXIS3.indexOf($("wMode").value) + 1;
 
+  // Phase 4 — depth fade (camPosLocal/camDirLocal have their own narrow
+  // per-frame path, pushCameraUniform() — not written here, see NOTES)
+  U.dpAmt.value   = V.dpAmt;
+  U.dpNear.value  = V.dpNear * radius;
+  U.dpFar.value   = V.dpFar * radius;
+  U.dpModeI.value = $("dpMode").value === "radial" ? 1 : 0;
+
   for (let i = 0; i < 4; i++) {
     const n = i + 1, r = region[i];
     U.rgPos[i].value.set(V[`rg${n}X`] * radius, V[`rg${n}Y`] * radius, V[`rg${n}Z`] * radius);
@@ -2848,6 +2930,45 @@ function updateCamDirty() {
   el.classList.toggle("show", dPos > eps || dTgt > eps);
 }
 
+/* Object-space camera uniform — Phase 4 spike of DEV_PLAN_EFFECTS.md.
+   Deliberately its OWN narrow path, not folded into pushUniforms():
+   pushUniforms() recomputes the entire graph from P/V/DOM state on every
+   call, which is correct for "something the user edited changed" but would
+   be wasteful to run 60x/second just because the camera moved — most of
+   those recomputed values are unrelated to depth fade and identical to a
+   moment ago. This function touches exactly the two uniforms depth fade
+   needs and nothing else, so it is cheap enough to call unconditionally
+   every frame regardless of whether anything else changed.
+
+   It still ends in mesh.updateVersion(), same discipline as the uniform
+   invariant documents for pushUniforms() — NOT relying on Spark's own
+   viewChanged gate to pick the fresh value up implicitly. viewChanged
+   WOULD cover the case where the camera itself moved (confirmed in NOTES:
+   "until the camera happens to move, at which point every pending edit
+   pops in at once" — camera motion already flips viewChanged), but relying
+   on that leaves a gap on any frame where depth fade's OWN inputs are
+   unchanged but something else bumps the version for an unrelated reason
+   — explicit and uniform beats implicit and conditional, and NOTES already
+   measured this bump as free (120fps idle/playing/displace-active at 177k
+   splats), which is why the plan could say "the version bump is already
+   measured free" instead of asking this phase to re-derive it.
+
+   Ordering is the other half of correctness here, not just presence: this
+   must run AFTER whatever positioned the camera this frame (driveCamera(),
+   controls.update()) and BEFORE the render call that will bake it in — see
+   both call sites. Getting that backwards gives a one-frame-stale focus
+   that looks exactly like a Spark sort/async issue and wastes a day
+   chasing the wrong bug, per the plan's own warning. */
+function pushCameraUniform() {
+  if (!mesh) return;
+  const localPos = mesh.worldToLocal(camera.position.clone());
+  U.camPosLocal.value.copy(localPos);
+  const worldDir = camera.getWorldDirection(new THREE.Vector3());
+  const localDir = mesh.worldToLocal(camera.position.clone().add(worldDir)).sub(localPos).normalize();
+  U.camDirLocal.value.copy(localDir);
+  mesh.updateVersion();
+}
+
 function setCamMode(mode) {
   camMode = mode;
   for (const b of document.querySelectorAll("#camModeBtns button")) {
@@ -3000,6 +3121,7 @@ function frame(now) {
   $("t-fps").textContent = fpsAvg.toFixed(0);
   updateCamDirty();
   controls.update();
+  pushCameraUniform();    // AFTER controls.update() — must see this frame's final camera pose, not last frame's
   renderer.render(scene, camera);
 }
 
@@ -3090,6 +3212,7 @@ $("render").onclick = async () => {
       pushUniforms();
       driveCamera();
       controls.update();
+      pushCameraUniform();   // AFTER driveCamera()/controls.update() — see the live loop's own note
 
       /* Spark sorts splats asynchronously off a GPU readback, so a frame
          rendered straight after a camera move can blend in stale order.
@@ -3159,7 +3282,7 @@ const PRESET_VERSION = 5;   // v2 selects; v3 audio; v4 regions+mask; v5 camera 
    sitting at, not of the look. A preset saved on a desktop must not force a
    phone back to full pixel ratio, nor the reverse. */
 const TOGGLES = ["useLod"];
-const SELECTS = ["res", "fps", "obAxis", "bgColor", "dField", "dcMode", "dcAxis", "qAxis", "wMode"];
+const SELECTS = ["res", "fps", "obAxis", "bgColor", "dField", "dcMode", "dcAxis", "qAxis", "wMode", "dpMode"];
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 function serialize() {
@@ -3868,6 +3991,7 @@ if (new URLSearchParams(location.search).has("debug")) {
     get playing(){ return playing; },
     set playing(v){ playing = v; },
     get bgColor(){ return $("bgColor").value; },
+    pushCameraUniform,
     /* Every coverage figure in NOTES was measured against "void". Both probe
        helpers below force it for their own duration regardless of what the
        UI has selected, and restore whatever was there before — a probe run
@@ -3881,6 +4005,7 @@ if (new URLSearchParams(location.search).has("debug")) {
       pushUniforms();
       driveCamera();
       controls.update();
+      pushCameraUniform();
       renderer.render(scene, camera);
       renderer.setClearColor(saved, 1);
     },
@@ -3892,6 +4017,7 @@ if (new URLSearchParams(location.search).has("debug")) {
         pushUniforms();
         driveCamera();
         controls.update();
+        pushCameraUniform();
         renderer.render(scene, camera);
         await spark.update({ scene, camera });
         renderer.render(scene, camera);

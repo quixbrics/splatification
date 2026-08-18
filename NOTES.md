@@ -1897,6 +1897,140 @@ real rendered output, not a `window.__bench` construction-only check.
 
 ---
 
+## Phase 4 of `DEV_PLAN_EFFECTS.md` — object-space camera uniform, and depth fade
+
+A deliberate spike: prove the object-space camera primitive with the
+cheapest possible consumer (depth fade) before DoF depends on it.
+
+### The uniform gets its own narrow path, not `pushUniforms()` — and still calls `updateVersion()`
+
+`pushUniforms()` recomputes the *entire* graph from `P`/`V`/DOM state on
+every call — correct for "the user edited something," wasteful to run
+60×/second just because the camera moved, when everything else it would
+recompute is unchanged from a moment ago. `pushCameraUniform()` touches
+exactly the two uniforms depth fade needs (`camPosLocal`, `camDirLocal`)
+and nothing else, so it is cheap enough to call unconditionally every
+frame regardless of whether anything else changed.
+
+It still explicitly ends in `mesh.updateVersion()` — the same discipline
+`pushUniforms()` follows, not a special case. The alternative was tempting
+and considered: NOTES already establishes (see "The uniform invariant")
+that camera motion sets Spark's own `viewChanged`, and *"until the camera
+happens to move, at which point every pending edit pops in at once"* — so
+in principle, relying on `viewChanged` alone would cover the one case that
+matters (the camera actually moved this frame). Rejected anyway: that
+leaves an implicit dependency on Spark's own internal change-detection
+firing in exactly the way this code assumes, versus an explicit, unconditional
+bump that is trivially correct by inspection. NOTES already measured this
+exact bump as free — **120fps idle, playing, and playing with displace
+active, at 177k splats** — which is the finding the plan's own text
+("the version bump is already measured free") is referring to; explicit
+and always-correct costs the same as implicit and conditionally-correct,
+so there was no real tradeoff to make here.
+
+### Ordering — the other half of correctness
+
+`pushCameraUniform()` must run **after** whatever positioned the camera
+this frame (`driveCamera()`, `controls.update()`) and **before** the
+render call that bakes it in. Both call sites (`frame()`'s live loop, and
+the export loop) were checked against this explicitly — getting it
+backwards gives a one-frame-stale focus that reads exactly like a Spark
+sort/async issue and, per the plan's own warning, wastes a day chasing the
+wrong bug. Also added to `window.__bench.draw()`/`.settled()` in the same
+position, so probe-based testing sees the same ordering the real render
+loop does.
+
+### Measured: object-space accuracy, across model transforms including a committed Correct-mode rotation
+
+`mesh.worldToLocal(camera.position.clone())` against an independently
+computed CPU reference (`camera.position.clone().applyMatrix4(new
+Matrix4().copy(mesh.matrixWorld).invert())` — deliberately spelled out
+rather than calling `worldToLocal` again, so the check is not just testing
+that a function equals itself):
+
+- Default transform: exact match to 6 decimal places.
+- After a **committed** Correct-mode edit (`rotX=15, rotY=47, posX=0.3`,
+  `xformCommit` actually clicked, not just staged): exact match to 6
+  decimal places again — `[-2.978799, 0.999423, 2.777934]` both ways.
+
+### Measured: zero one-frame lag
+
+Two consecutive camera jumps to very different positions, each followed
+by exactly **one** `__bench.settled()` call: `camPosLocal` matched the CPU
+reference immediately both times, no second call needed to catch up. This
+is a different question from the "one extra render to settle" hazard
+NOTES already documents for the async **sort** (Model transform —
+Invalidation, above) — that hazard is about blend/paint *order* catching
+up, not about a uniform *value* being visible. Confirmed these are
+independent: the uniform value itself was correct on the very first
+settled render both times.
+
+### Depth fade — measured behaviour
+
+Fades **both** opacity and tint-toward-background together, scaled by one
+`dpAmt` — the plan's "fade opacity or tint toward a colour" implemented as
+one coherent aerial-perspective effect rather than a second mode toggle.
+`dpColor` syncs to whatever `bgColor` (Phase 2b) currently is, via
+`applyBgColor()`, rather than being a separate control — distant splats
+dissolve into whatever backdrop is showing, the standard fog-matches-
+background convention, and it needed no new UI.
+
+Against the loaded capture, `window.__bench.settled()` throughout:
+
+- `dpAmt=0`: exact baseline (this is also, incidentally, how every other
+  effect in this graph behaves at its own neutral value — no special case).
+- Near/far pushed **beyond** the whole object (`near=10, far=20`): exact
+  baseline again — nothing gets faded when everything is closer than
+  `near`, confirming the clamp's lower bound.
+- Near/far collapsed to a sliver in front of the camera
+  (`near=0, far=0.01`): coverage **0** — full dissolve, confirms the
+  clamp's upper bound and that both opacity and colour fade together
+  strongly enough to fully vanish, not just dim.
+- A realistic mid-range band (`near=2.5, far=3.5`) at full amount: R/G/B
+  all measurably shift toward the void backdrop (`87.4→75.1`,
+  `71.2→62.8`, `60.8→54.7`) while coverage barely moves — exactly the
+  expected shape for a *partial*, colour-shifting fade rather than a
+  binary cutoff.
+- **Planar vs radial genuinely differ**: same near/far, off-axis camera
+  position (`(2, 0.5, 2)` looking at the origin, where view-direction depth
+  and straight-line distance diverge) — different measured colour in each
+  mode, confirming the mode select reaches something real rather than being
+  a no-op alternative.
+- **Export, 48 simulated frames**, exact call sequence from the export
+  loop (`driveCamera(t); controls.update(); pushCameraUniform();`) against
+  an authored 3-key camera move: **zero frozen frame pairs** in
+  `camPosLocal` — it tracks the moving camera throughout, not stuck at
+  frame 0's value.
+
+### A real bug this phase's own testing caught, before it shipped
+
+`U.dpColor.value.setHex(hex)` — every `dyno.dynoVec3(...)` uniform in this
+file wraps a `THREE.Vector3`, which has no `.setHex()` (that is a
+`THREE.Color` method). Threw immediately on the very first preset-load
+test (`"U.dpColor.value.setHex is not a function"`), caught before this
+reached NOTES as a finished measurement. Fixed by decoding through a
+throwaway `THREE.Color` and setting the vector's components directly —
+`U.dpColor.value.set(rgb.r, rgb.g, rgb.b)` — the same pattern `U.tint`
+already uses elsewhere in this file. Re-verified after the fix: `dpColor`
+correctly reads `[1,1,1]` after selecting the white background, and the
+full preset round-trip (save → wipe → load) for all four new fields
+(`dpAmt`, `dpNear`, `dpFar`, `dpMode`) restores exactly.
+
+### Environment note
+
+The full-canvas `readPixels` probe intermittently returned an all-zero
+buffer (`cov: 100, R: 0` or `cov: 0` depending on the exact bug shape) in
+this session's long-lived browser tab, while single-pixel reads at the
+same coordinates returned real data — the same tab-level degradation
+pattern already seen in Phases 2 and 3 (many navigations, contexts
+created/destroyed over one long session), not a code issue. Confirmed by
+reproducing cleanly in a freshly opened tab. `window.__bench.settled()`
+also needed 2–3 calls after a `reset → reframe` sequence before the probe
+stabilised on some runs — consistent with the already-documented generator
+warm-up transient, not new behaviour.
+
+---
+
 ## Section accordion and `SPEC` groups
 
 `SPEC` entries are `[id, digits, group]`. The group ties a parameter to its rail
