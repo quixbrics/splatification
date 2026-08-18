@@ -557,6 +557,62 @@ camDrive checkbox stay (Phase 5 turns `camDrive` into an explicit three-way
 mode — Manual / Keyframes / Orbit — this phase does not touch that shape,
 only what the "Keyframes" case now drives).
 
+### Phase 2d of `DEV_PLAN_EFFECTS.md` — draggable on the timeline
+
+Camera-key ticks (`.camtick`, plain positioned divs — see the reasoning for
+that above) were click-to-jump/alt-click-to-delete only; retiming meant
+delete-and-re-add. Now draggable, horizontally only (there is no Y value to
+edit here, unlike the canvas-drawn parameter-envelope keys).
+
+- **Retimes live, rebuilds once.** `pointermove` updates only the dragged
+  key's `t` and its own element's `left` — it does **not** call
+  `rebuildCamCurves()`, which reconstructs two `CatmullRomCurve3` instances
+  from scratch and would be the obvious regression if run on every move
+  event. The curve, the array sort, and the rest of the row's ticks all catch
+  up once, in the `pointerup` handler, on drop.
+- **Clamped to neighbours, not reorderable.** The drag bound
+  (`[prevT + KEY_EPS, nextT - KEY_EPS]`) is computed once at `pointerdown`
+  from the sorted array's immediate neighbours, so a key can never cross —
+  and, by construction, can never land within `KEY_EPS` of — an adjacent key.
+  No post-hoc "snap clear" correction is needed because the clamp bound is
+  already inset by `KEY_EPS` on both sides.
+- **A drag-release must not fire the click handler's delete/jump.** Native
+  `click` fires on `pointerup` for the same target regardless of how far the
+  pointer travelled in between, so a completed drag would otherwise also
+  jump the playhead (or delete the key, if released with Alt still held).
+  Gated on movement distance, not on `pointerup` alone, per the plan: a
+  `moved` flag flips true past a 3px threshold, and `camKeyDrag` is set to
+  the sentinel string `"just-dropped"` (rather than cleared to `null`) only
+  when a real drag happened — the click handler checks for that sentinel
+  first and swallows the event, resetting to `null` itself. A sub-threshold
+  jitter clears straight to `null`, so the following click behaves as an
+  ordinary click (jump), which is correct — nothing was actually dragged.
+
+Verified via `window.__bench` with real `PointerEvent`s (not `.click()` —
+see the environment note below): dragging the middle of 3 keys from `t=0.5`
+retimed it live (`moved:true`, element position tracked the pointer) and
+committed to the dropped value on release; the immediately-following `click`
+event (the same one a real drag-release produces) was swallowed — key count
+and position both unchanged by it. Dragging past a neighbour clamped exactly
+at `1 - KEY_EPS = 0.999` and never reordered (`CAMKEYS` stayed sorted). A
+2px sub-threshold jitter left `moved:false` and the key's `t` untouched.
+Alt-click delete with no preceding drag still removed the key normally.
+Re-ran the existing 5-key smoothness regression (max/mean step ratio) against
+a post-drag key set: **1.647×**, comfortably inside the established ≤3× bound.
+
+**Environment note, not specific to this change:** synthetic event dispatch
+(`dispatchEvent` for `input`, `pointerdown`, etc.) became unreliable partway
+through this session's browser tab — traced to the tab itself, not the code:
+a *freshly opened* tab loading the identical build dispatched and received
+events normally, while the original tab (after many navigations, a `git
+stash`/pop cycle, and at least one "Claude in Chrome is not connected"
+disconnect) did not, even for a brand-new, unrelated `<div>` with a
+freshly-attached listener created in the same script. All Phase 2 interactive
+testing above was therefore done in a fresh tab. Direct state manipulation
+via `window.__bench` (bypassing DOM event dispatch entirely) remained
+reliable throughout and is what earlier Phase 2 sections lean on where a
+fresh tab wasn't already in hand.
+
 ---
 
 ## Model transform — Correct mode
@@ -1207,6 +1263,47 @@ a bug report. Round-tripped through the actual UI (save → wipe → load) with
 distinctive values (attack 80, release 600, gain 1.8, floor 0.05, curve 1.6)
 and confirmed byte-exact.
 
+### Phase 2a of `DEV_PLAN_EFFECTS.md` — discoverability
+
+Everything above existed and worked; nobody could find it. `#audShapeToggle`
+was a plain `Shape ▾` button with no indication anything behind it was
+non-default, sitting in a lane header that only appears once a parameter is
+focused. Two fixes, both reusing existing language rather than inventing new
+affordances:
+
+- **Dirty indicator.** `#audShapeToggle.dirty` goes `--edit` violet exactly
+  when any of the six shaping fields differs from its default
+  (`attack:0, release:120, lag:0, gain:1, floor:0, curve:1`) — the same
+  `.dirty` convention `.rst` reset buttons already use, so it reads as the
+  same language rather than a new one.
+- **Collapsed summary.** The button's own label grows non-default fields
+  inline when collapsed: `Shape ▾ · lag +250 · rel 600`. The arrow alone
+  never told anyone lag and smoothing lived behind it, which is exactly why
+  they went unfound; now the values that matter are visible without opening
+  anything.
+
+`refreshShapeToggle()` is the single place both are computed, called from
+`laneHead()` (on focus change), the toggle's own click (open/close), and
+every shaping slider's `oninput` (so it updates live while dragging, not just
+on focus). Verified via `window.__bench` (bypassing synthetic DOM event
+dispatch, which was unreliable in this session's browser tab — see the
+environment note under Phase 2d below): setting all six fields to distinctive
+values and calling `laneHead()` produced
+`Shape ▾ · atk 80 · rel 600 · lag +250 · gain 1.8 · flr 0.05 · curve 1.6`
+with `.dirty` set; resetting to defaults produced a clean `Shape ▾` with no
+`.dirty`; a single off-default field (`lag -100`) produced `Shape ▾ · lag -100`
+alone, confirming the summary only lists what actually differs.
+
+**Reachability at 390px, measured rather than assumed** (per the plan's own
+instruction — the lane header scrolls horizontally on mobile with no visible
+scrollbar, and `Shape ▾` is the rightmost control). Forced `#laneHead` to a
+390px box and measured `scrollWidth` (720) against `clientWidth` (390): it
+does need a scroll, and `scrollIntoView` on the toggle successfully brings it
+within the header's visible bounds — reachable, just not signposted. That
+lack of a scroll hint is pre-existing (the whole row already scrolls this way
+for every other lane control) and out of scope here; this phase only had to
+confirm the toggle itself isn't stranded off-screen, which it is not.
+
 ---
 
 ## Mobile
@@ -1423,6 +1520,103 @@ load transient, so it was empty, every mean divided by zero, and `NaN`
 comparisons silently evaluated false in the `Math.max` accumulator. **Assert
 the mask is non-empty and every value finite before comparing.** A pass built
 on NaN looks exactly like a real pass.
+
+---
+
+## Splat brightness
+
+Phase 2c of `DEV_PLAN_EFFECTS.md`. `bright` — group `colour`, range 0..2,
+default 1 — is a flat multiply on the un-tinted source colour, applied first
+in the chain, before everything else:
+
+```
+raw rgb -> brightness -> tint -> saturation -> alpha ops
+```
+
+Brightness sits before saturation on purpose (per the plan): saturation must
+operate on the *brightness-corrected* image, not the other way round, or
+brightening after desaturating would reintroduce colour the user just
+removed. It is **not maskable** (not in `MASKABLE`) and **not region-gated**
+(applied to `rgbRaw` before `tintMix`'s region colorize) — a flat, always-on
+multiply, same category as `dFrq`/`dSpd` rather than the six masked effects.
+
+Same display-referred reasoning as everywhere else in this file (see
+Saturation, above): this is a gamma-space multiply, not a linear-light
+exposure control. **Call it brightness, not exposure** — a true exposure
+slider needs linearise → scale → re-encode, a different and probably
+unwanted job, and NOTES already establishes the graph is display-referred
+throughout. Not clamped, for the same reason `sat` is not: the framebuffer
+clamps on write regardless, and per-splat clamping would not equal
+frame-level clamping (see Saturation's "Response is linear below sat = 1"
+above — the identical mechanism applies here above `bright = 1`).
+
+**Not independently measured on luma this pass, and why:** every other
+colour-chain measurement in this file (the sat=1 neutral check, the
+tint-ratio check, the display-referred proof) was taken by reading back
+actual rendered pixels against the loaded butterfly capture. The demo asset
+failed to load in this session's browser environment for the whole of this
+work — reproduced identically on the pre-Phase-1 committed build via
+`git stash`, so it is environmental (see Phase 1's note on the same gap), not
+a defect in this change. What *was* verified without a mesh: `U.bright`
+tracks `P.bright` exactly through `pushUniforms()`/`evalParams()` (set 0.5,
+read back 0.5; reset to 1, read back 1), and `buildModifier()` — the actual
+dyno graph construction, including the new
+`dyno.mul(dyno.swizzle(rgba0, "xyz"), U.bright)` call — constructs without
+throwing. The luma sweep (0.5/1/2 against the pre-change baseline, within 1%
+at 1) from the plan's acceptance section is a real gap, not a claimed pass;
+re-run it the next time a splat loads cleanly in this environment.
+
+---
+
+## Background colour
+
+Phase 2b of `DEV_PLAN_EFFECTS.md`. A small fixed palette — void (`#08090b`,
+the existing default), black, mid grey, white, chroma green (`#00ff00`) — not
+a colour picker, via a `SELECTS` entry (`bgColor`) applied through
+`renderer.setClearColor()`. A look property, so it persists in presets
+(additive — no `PRESET_VERSION` bump, same as every other `SELECTS` entry);
+deliberately *not* in the `mobileMode`-style device-property exclusion list,
+since background is part of the look, not the workstation.
+
+### The trap the plan called out, guarded in the same commit
+
+Every coverage figure anywhere in this file — the cull table, the six-shape
+SDF reproduction, the Reveal migration curve, the masking verification, the
+saturation neutral check — was measured against void, because coverage is a
+pixel count against a known backdrop. A non-default background would
+invalidate all of them silently the moment someone picked one to look at
+their capture against something else.
+
+`window.__bench.draw()` and `.settled()` now save the current clear colour,
+force void for the render, and restore whatever was there afterward — in a
+`try/finally` in `.settled()` so an exception mid-probe cannot leave the
+renderer stuck on void. Verified directly: selected white in the UI, called
+`draw()`, read back the actual rendered pixel — `[8, 9, 11, 255]`, void's
+exact value, not white — while the live `COLOR_CLEAR_VALUE` state immediately
+after was back to white, confirming the guard is transparent to the caller's
+own selection. This is the mechanism every future probe-based measurement in
+this file relies on continuing to hold; if it is ever removed, the entire
+measured-coverage corpus needs re-baselining against whatever the new default
+render path produces.
+
+### Export is unguarded on purpose
+
+The export loop never touches `setClearColor` — it inherits whatever the live
+renderer state is, same as the interactive view, so an export naturally shows
+whatever background the user picked. Only the two `__bench` *measurement*
+helpers force void; nothing in the render or export path does, since forcing
+it there would defeat the point of having the control.
+
+### Preset round-trip
+
+Verified through the actual UI (save → wipe → load), together with
+brightness: saved with `bgColor = "chroma"` and `bright = 0.42`, wiped via the
+reset buttons, reloaded from the saved JSON — both restored exactly
+(`P.bright === 0.42`, the select's value `"chroma"`, and — the part that
+actually matters — the *live* `COLOR_CLEAR_VALUE` reading `[0, 255, 0, 255]`
+after load, confirming `applyPreset()`'s explicit `applyBgColor()` call
+actually pushes the restored selection into the renderer rather than leaving
+a `<select>` whose value nobody applied).
 
 ---
 

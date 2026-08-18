@@ -87,6 +87,7 @@
     padding:8px 16px;
   }
   #audShapePanel.hide{display:none}
+  #audShapeToggle.dirty{color:var(--edit); border-color:var(--edit)}
   #audSpark{width:100%; height:34px; display:block; margin-bottom:6px}
   #audShapeRows{display:grid; grid-template-columns:1fr 1fr; gap:0 16px}
   #audShapeRows .row{margin-bottom:5px}
@@ -102,8 +103,8 @@
   #camRowHint.hide{display:none}
   .camtick{
     position:absolute; top:3px; width:10px; height:10px; margin-left:-5px;
-    background:var(--edit); cursor:pointer; transform:rotate(45deg);
-    border:1px solid var(--chassis);
+    background:var(--edit); cursor:ew-resize; transform:rotate(45deg);
+    border:1px solid var(--chassis); touch-action:none;
   }
   .camtick.onkey{background:var(--live)}
   #laneWrap{position:relative; flex:1; min-height:0}
@@ -601,6 +602,8 @@
 
   <details class="mod" data-group="colour">
     <summary>Colour <em>tint + saturation</em><i class="gflag"></i></summary>
+    <div class="row"><label>Brightness</label><output id="o-bright">—</output>
+      <input type="range" id="p-bright" min="0" max="2" step="0.01" value="1"></div>
     <div class="row"><label>R</label><output id="o-tR">—</output>
       <input type="range" id="p-tR" min="0" max="2" step="0.01" value="1"></div>
     <div class="row"><label>G</label><output id="o-tG">—</output>
@@ -670,6 +673,15 @@
 
   <details class="mod" data-group="viewport">
     <summary>Viewport<i class="gflag"></i></summary>
+    <div class="btns" style="margin-bottom:9px">
+      <select id="bgColor" title="Applies to the live view and export — not the effect stack, which is always measured against Void">
+        <option value="void" selected>Void</option>
+        <option value="black">Black</option>
+        <option value="grey">Mid grey</option>
+        <option value="white">White</option>
+        <option value="chroma">Chroma green</option>
+      </select>
+    </div>
     <div class="row"><label>Pixel ratio</label><output id="o-dpr">—</output>
       <input type="range" id="p-dpr" min="0.5" max="2" step="0.05" value="1"></div>
     <label class="check"><input type="checkbox" id="useLod"> Level of detail on next load (large scans)</label>
@@ -779,6 +791,21 @@ const renderer = new THREE.WebGLRenderer({
 renderer.setClearColor(0x08090b, 1);
 stage.appendChild(renderer.domElement);
 
+/* Background colour — a small fixed palette, not a picker, applied via
+   setClearColor. A look property (persisted in presets, via SELECTS below),
+   not a device property (unlike Mobile profile). "void" is 0x08090b, the
+   value every coverage figure in NOTES was measured against — the cull
+   table, the six-shape SDF reproduction, the Reveal migration curve, the
+   masking verification. A non-default background invalidates all of them
+   silently, since coverage is a pixel count against a known backdrop. See
+   the __bench guard on draw()/settled() below, which forces void for the
+   duration of any probe regardless of what the UI has selected. */
+const BG_COLORS = { void: 0x08090b, black: 0x000000, grey: 0x808080, white: 0xffffff, chroma: 0x00ff00 };
+function applyBgColor() {
+  renderer.setClearColor(BG_COLORS[$("bgColor").value] ?? BG_COLORS.void, 1);
+}
+$("bgColor").onchange = applyBgColor;
+
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(50, 1, 0.01, 1000);
 camera.position.set(0, 0, 3);
@@ -883,6 +910,7 @@ const U = {
   dRnd:    F(1),
   tint:    dyno.dynoVec3(new THREE.Vector3(1, 1, 1)),
   sat:     F(1),
+  bright:  F(1),
   /* Region slots, one array entry per slot (index 0..3 = R1..R4). Shape and
      mode are float-encoded indices (see RG_SHAPES/RG_MODES below) rather than
      strings, so the graph can select among them with plain float `equal`
@@ -1054,7 +1082,15 @@ function buildModifier() {
     scales = dyno.mul(dyno.mul(scales, scaleEff), shrinkFactor);
 
     /* --- colour + alpha ------------------------------------------------ */
-    const rgbRaw = dyno.swizzle(rgba0, "xyz");
+    /* Chain order: raw -> brightness -> tint -> saturation -> alpha ops (see
+       Splat brightness in NOTES). Brightness sits first and unconditionally
+       (not maskable, not region-gated — a flat multiply on the un-tinted
+       source), so saturation always operates on the brightness-corrected
+       image rather than the other way round. Display-referred, same as
+       every other colour op here: a straight gamma-space multiply, not a
+       linearise/scale/re-encode exposure control — see NOTES for why that
+       distinction matters and is deliberate. */
+    const rgbRaw = dyno.mul(dyno.swizzle(rgba0, "xyz"), U.bright);
     const rgbTinted = dyno.mul(rgbRaw, U.tint);
     let rgb = dyno.mix(rgbRaw, rgbTinted, pickMask("tint"));            // neutral: untinted
     rgb = dyno.mul(rgb, tintMix);                                        // region colorize, always-on per slot
@@ -1123,6 +1159,7 @@ const SPEC = [
   ...REGION_SPEC,
   ["dAmt", 3, "displace"], ["dFrq", 2, "displace"],
   ["dSpd", 2, "displace"], ["dRnd", 2, "displace"],
+  ["bright", 2, "colour"],
   ["tR", 2, "colour"], ["tG", 2, "colour"], ["tB", 2, "colour"],
   ["sat", 2, "colour"],
   ["br", 0, "output"], ["settle", 0, "output"], ["dpr", 2, "viewport"],
@@ -1249,6 +1286,39 @@ const ENV_RATE = 200;                 // envelope samples per second
 const AUD = {};                       // id -> { band, depth, attack, release, lag, gain, floor, curve }
 const audOf = (id) =>
   (AUD[id] ??= { band: "", depth: 0, attack: 0, release: 120, lag: 0, gain: 1, floor: 0, curve: 1 });
+
+/* Discoverability (Phase 2a of DEV_PLAN_EFFECTS.md): shaping already existed
+   but was invisible — a plain "Shape ▾" button with no indication that
+   anything behind it was non-default. Mirrors the existing .rst.dirty
+   convention (reset buttons go --edit violet when off default) so it reads
+   as the same language as everything else in this file, and summarises
+   which fields on the COLLAPSED control, since the label alone doesn't tell
+   anyone that lag and smoothing live behind it — which is exactly why they
+   were not found. */
+const SHAPE_DEFAULT = { attack: 0, release: 120, lag: 0, gain: 1, floor: 0, curve: 1 };
+const SHAPE_ABBR = { attack: "atk", release: "rel", lag: "lag", gain: "gain", floor: "flr", curve: "curve" };
+function isShapeDirty(a) {
+  return Object.keys(SHAPE_DEFAULT).some((k) => a[k] !== SHAPE_DEFAULT[k]);
+}
+function shapeSummary(a) {
+  const parts = [];
+  for (const k of Object.keys(SHAPE_DEFAULT)) {
+    if (a[k] === SHAPE_DEFAULT[k]) continue;
+    const v = k === "lag" && a[k] > 0 ? "+" + a[k] : String(+a[k].toFixed(2));
+    parts.push(`${SHAPE_ABBR[k]} ${v}`);
+  }
+  return parts.join(" · ");
+}
+function refreshShapeToggle() {
+  const btn = $("audShapeToggle");
+  if (btn.disabled) { btn.textContent = "Shape ▾"; btn.classList.remove("dirty"); return; }
+  const a = audOf(focused);
+  const dirty = isShapeDirty(a);
+  btn.classList.toggle("dirty", dirty);
+  const open = !$("audShapePanel").classList.contains("hide");
+  const arrow = open ? "Shape ▴" : "Shape ▾";
+  btn.textContent = dirty ? `${arrow} · ${shapeSummary(a)}` : arrow;
+}
 
 let audioName = null;
 let audioDur = 0;
@@ -1533,6 +1603,7 @@ stage.addEventListener("pointerdown", () => {
  * ------------------------------------------------------------------ */
 let focused = null;
 let drag = null;
+let camKeyDrag = null;   // {key, el, startX, startT, lo, hi, w, moved} while dragging a camera-key tick
 
 function setKey(id, t, v) {
   const e = envOf(id);
@@ -1712,6 +1783,7 @@ function laneHead() {
     $(id).disabled = off;
     $("o-" + id).textContent = (off ? parseFloat($(id).defaultValue) : a[key]).toFixed(digits);
   }
+  refreshShapeToggle();
   drawSparkline();
 
   /* Mask only shows for the 6 maskable parameters (tR/tG/tB share the "tint"
@@ -2094,6 +2166,7 @@ function pushUniforms() {
   U.dFrq.value    = V.dFrq / Math.max(radius, 1e-6);
   U.dSpd.value    = V.dSpd;
   U.dRnd.value    = V.dRnd;
+  U.bright.value  = V.bright;
   U.tint.value.set(V.tR, V.tG, V.tB);
   U.sat.value     = V.sat;
 
@@ -2505,8 +2578,17 @@ function drawCamRow() {
     const el = document.createElement("div");
     el.className = "camtick" + (Math.abs(k.t - playhead) < KEY_EPS ? " onkey" : "");
     el.style.left = (k.t * w) + "px";
-    el.title = `t=${k.t.toFixed(2)} — click to jump, alt-click to delete`;
+    el.title = `t=${k.t.toFixed(2)} — drag to retime, click to jump, alt-click to delete`;
+    el.addEventListener("pointerdown", (ev) => {
+      if (ev.altKey) return;                  // let the click handler's delete fire instead
+      const i = CAMKEYS.indexOf(k);
+      const lo = i > 0 ? CAMKEYS[i - 1].t + KEY_EPS : 0;
+      const hi = i < CAMKEYS.length - 1 ? CAMKEYS[i + 1].t - KEY_EPS : 1;
+      camKeyDrag = { key: k, el, startX: ev.clientX, startT: k.t, lo, hi, w: row.clientWidth || 1, moved: false };
+      el.setPointerCapture(ev.pointerId);
+    });
     el.addEventListener("click", (ev) => {
+      if (camKeyDrag === "just-dropped") { camKeyDrag = null; return; }   // suppress the click a drag-release produces
       if (ev.altKey) {
         const i = CAMKEYS.indexOf(k);
         if (i >= 0) { CAMKEYS.splice(i, 1); rebuildCamCurves(); refreshCamUI(); setStatus(`Camera key removed — ${CAMKEYS.length} left.`); }
@@ -2516,6 +2598,43 @@ function drawCamRow() {
     });
     row.appendChild(el);
   }
+}
+
+/* Camera key drag — retimes in place. Deliberately does NOT call
+   rebuildCamCurves() on every pointermove: that rebuilds two
+   CatmullRomCurve3 instances from scratch, which is the obvious regression
+   during a drag. Only the dragged element's own position and its key's `t`
+   update live; the curve, the sort, and the rest of the row's ticks catch up
+   once on drop. Clamped to the immediate neighbours (computed once, at
+   pointerdown, from the SORTED order) rather than allowing reorder — letting
+   a key cross its neighbour mid-drag would change which key is which while
+   dragging, which is confusing and makes undo worse. The clamp bound is
+   already inset by KEY_EPS on each side, so a drag can never land within
+   epsilon of a neighbour in the first place — "snap clear" by construction,
+   not a post-hoc correction. */
+addEventListener("pointermove", (ev) => {
+  if (!camKeyDrag) return;
+  const dx = ev.clientX - camKeyDrag.startX;
+  if (Math.abs(dx) > 3) camKeyDrag.moved = true;
+  if (!camKeyDrag.moved) return;
+  const t = clamp(camKeyDrag.startT + dx / Math.max(camKeyDrag.w, 1), camKeyDrag.lo, camKeyDrag.hi);
+  camKeyDrag.key.t = t;
+  camKeyDrag.el.style.left = (t * camKeyDrag.w) + "px";
+  camKeyDrag.el.title = `t=${t.toFixed(2)} — drag to retime, click to jump, alt-click to delete`;
+});
+for (const ev of ["pointerup", "pointercancel"]) {
+  addEventListener(ev, () => {
+    if (!camKeyDrag || camKeyDrag === "just-dropped") return;
+    const { moved, key } = camKeyDrag;
+    camKeyDrag = moved ? "just-dropped" : null;   // sentinel: swallow the click this release is about to fire
+    if (moved) {
+      CAMKEYS.sort((a, b) => a.t - b.t);
+      rebuildCamCurves();
+      refreshCamUI();
+      driveCamera();
+      setStatus(`Camera key retimed — t=${key.t.toFixed(2)}.`);
+    }
+  });
 }
 
 function refreshCamUI() {
@@ -2731,7 +2850,7 @@ const PRESET_VERSION = 5;   // v2 selects; v3 audio; v4 regions+mask; v5 camera 
    sitting at, not of the look. A preset saved on a desktop must not force a
    phone back to full pixel ratio, nor the reverse. */
 const TOGGLES = ["useLod"];
-const SELECTS = ["res", "fps", "obAxis"];
+const SELECTS = ["res", "fps", "obAxis", "bgColor"];
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 function serialize() {
@@ -2830,6 +2949,7 @@ function applyPreset(o) {
     // only accept values the control actually offers
     if ([...$(id).options].some((opt) => opt.value === v)) $(id).value = v;
   }
+  applyBgColor();   // selects loop above only sets the <select>'s value — setClearColor needs an explicit push
 
   // envelopes: wipe first, so loading is a replace and never a merge
   for (const id of ANIM) {
@@ -3180,7 +3300,7 @@ $("audDepth").oninput = () => {
 $("audShapeToggle").onclick = () => {
   const panel = $("audShapePanel");
   panel.classList.toggle("hide");
-  $("audShapeToggle").textContent = panel.classList.contains("hide") ? "Shape ▾" : "Shape ▴";
+  refreshShapeToggle();
   if (!panel.classList.contains("hide")) { laneFit(); drawSparkline(); }
 };
 
@@ -3197,6 +3317,7 @@ for (const [id, key, digits] of [
     audOf(focused)[key] = parseFloat($(id).value);
     $("o-" + id).textContent = audOf(focused)[key].toFixed(digits);
     pushUniforms();
+    refreshShapeToggle();
     drawSparkline();
   };
 }
@@ -3426,16 +3547,43 @@ if (new URLSearchParams(location.search).has("debug")) {
     reframe,
     xctl,
     pushUniforms,
+    buildModifier,
+    focusParam,
+    laneHead,
+    audOf,
+    get focused(){ return focused; },
+    get camKeyDrag(){ return camKeyDrag; },
+    get bgColor(){ return $("bgColor").value; },
+    /* Every coverage figure in NOTES was measured against "void". Both probe
+       helpers below force it for their own duration regardless of what the
+       UI has selected, and restore whatever was there before — a probe run
+       against a non-default background must not silently produce numbers
+       that don't match those baselines, and the caller's own background
+       choice must not be clobbered by having probed once. */
     draw() {
+      const saved = new THREE.Color();
+      renderer.getClearColor(saved);
+      renderer.setClearColor(BG_COLORS.void, 1);
       pushUniforms();
       driveCamera();
       controls.update();
       renderer.render(scene, camera);
+      renderer.setClearColor(saved, 1);
     },
     async settled() {
-      this.draw();
-      await spark.update({ scene, camera });
-      renderer.render(scene, camera);
+      const saved = new THREE.Color();
+      renderer.getClearColor(saved);
+      renderer.setClearColor(BG_COLORS.void, 1);
+      try {
+        pushUniforms();
+        driveCamera();
+        controls.update();
+        renderer.render(scene, camera);
+        await spark.update({ scene, camera });
+        renderer.render(scene, camera);
+      } finally {
+        renderer.setClearColor(saved, 1);
+      }
     },
   };
 }
