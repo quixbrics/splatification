@@ -2504,6 +2504,67 @@ ffprobe -v error -f lavfi -i "movie=out.mp4,signalstats" \
 `VideoFrame(canvas)` capture. It costs some performance; do not remove it
 without re-testing export.
 
+### Audio muxing
+
+Exported video now includes the loaded audio track automatically — no
+separate toggle. Whenever `audioBuffer` (the decoded `AudioBuffer` from
+`analyseAudio()`, kept around purely for this — see Audio-reactive drive
+above, which never needed the decoded PCM itself, only the derived band
+envelopes) is present and `AudioEncoder` exists, `Muxer` gets an `audio:
+{codec:"aac", numberOfChannels, sampleRate}` track alongside the video one,
+and `encodeAudioTrack()` runs as a **separate phase after** the video frame
+loop finishes (not interleaved frame-by-frame) — `VideoEncoder` and
+`AudioEncoder` are independent state machines, and `mp4-muxer` only needs
+each track's own samples in increasing timestamp order, not the two tracks
+woven together, so interleaving would add complexity for no benefit.
+
+**Trim behaviour matches the interactive preview's own established rule**
+(`audioFollow()`'s comment, and the loop-boundary fix above): audio plays
+from `t=0` for its own length or until the clip ends, whichever is
+shorter — no looping, since export is a single linear pass and the
+timeline-loop case that motivated `audioFollow()` at the loop boundary does
+not apply to a one-shot render. If the track is longer than Duration, audio
+is trimmed to match; if shorter, the video simply has a silent tail after
+the audio track ends, which is a valid, ordinary MP4 (no need to synthesize
+padding silence).
+
+Encoded as `f32-planar` `AudioData` in 4096-frame chunks against the
+`AudioBuffer`'s own native sample rate/channel count (no resampling), AAC-LC
+(`mp4a.40.2`) at 128 kbps. `AudioEncoder` support is checked separately from
+the `VideoEncoder` gate at the top of the render handler and its absence
+(Safari, Firefox) falls back to a video-only export with a status message,
+rather than blocking Render the way a missing `VideoEncoder` does — video
+export has always worked without audio and should keep doing so.
+
+**Verified end-to-end** against the loaded `butterfly.spz` and the
+`bandtest.wav` fixture (6.0s), via direct MP4 box-structure parsing (a
+minimal in-page scanner reading `moov/trak/mdia/hdlr` handler types and
+`mdhd` timescale/duration, rather than trusting the file merely downloaded):
+
+- **Structure**: exported file has exactly two tracks, handler types `vide`
+  and `soun`; `stsd` shows `avc1` (video) and `mp4a` (audio) — both encoders
+  actually ran, not just the video one.
+- **Trim, audio shorter than Duration** (`dur=4` against the 6s fixture):
+  video track `duration=4.000s` exactly (`timescale=24, duration=96`);
+  audio track `duration=4.087s` — capped near 4s as designed, the extra
+  ~87ms being ordinary AAC frame-boundary padding (1024-sample frames don't
+  divide evenly into an arbitrary sample count), not a bug.
+- **Trim, audio longer than Duration is impossible here since the fixture
+  is 6s** — tested the reverse instead: `dur=10` against the same 6s
+  fixture. Video track `10.000s` exactly; audio track `6.084s` (same
+  frame-boundary padding) — a legitimate silent tail for the remaining
+  ~4s, no error, no truncation of the video.
+- **No audio loaded**: export unaffected — single `vide` track only, status
+  text omits "+ audio", confirming the automatic-inclusion logic doesn't
+  regress the existing video-only path.
+- **Content, not just structure**: decoded the exported file's audio track
+  back via the browser's own `AudioContext.decodeAudioData()` — real,
+  non-silent signal (RMS 0.087, consistent across the clip, which is
+  *expected* rather than suspicious: `bandtest.wav`'s three bands are equal-
+  amplitude sine tones at different frequencies, so RMS alone does not and
+  should not show the band transitions — checking for frequency content
+  was not needed to confirm audio is present and not silence/garbage).
+
 ---
 
 ## Roadmap, roughly in order

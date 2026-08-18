@@ -1708,6 +1708,7 @@ let audioName = null;
 let audioDur = 0;
 let audioEnv = null;                  // { low: Float32Array, mid, high }
 let audioEl = null;                   // <audio> for optional preview
+let audioBuffer = null;               // decoded PCM (AudioBuffer) — kept ONLY for export muxing, nothing playback-related reads it
 const audioLevel = { low: 0, mid: 0, high: 0 };
 
 /* Downsample a rendered band to an RMS envelope at ENV_RATE. */
@@ -1752,6 +1753,7 @@ async function analyseAudio(arrayBuffer, name) {
   audioEnv = env;
   audioDur = buf.duration;
   audioName = name;
+  audioBuffer = buf;                  // kept for export muxing — see the render handler
   shapeCache.clear();                 // every cached shaped array points at the OLD track now
   return buf;
 }
@@ -3215,6 +3217,63 @@ async function drain(encoder, below) {
   }
 }
 
+/* Encodes the loaded track into the muxer's audio track, trimmed to
+   `endSeconds` — matching how the interactive preview already treats a
+   Duration longer or shorter than the track (see audioFollow()'s own
+   comment): audio plays from t=0 for its own length or until the clip
+   ends, whichever is shorter, and is simply silent for any remainder if
+   the clip is longer. No looping — export is a single linear pass, so the
+   timeline-loop case audioFollow() handles does not apply here.
+
+   Runs as a separate phase AFTER the video frame loop, not interleaved
+   frame-by-frame — VideoEncoder and AudioEncoder are independent state
+   machines and mp4-muxer only requires each track's own samples in
+   increasing timestamp order, not the two tracks interleaved with each
+   other, so there is nothing simpler doing this in one pass would buy. */
+async function encodeAudioTrack(muxer, endSeconds) {
+  const sampleRate = audioBuffer.sampleRate;
+  const channels = audioBuffer.numberOfChannels;
+  const totalFrames = Math.max(0, Math.min(
+    Math.round(endSeconds * sampleRate),
+    audioBuffer.length,
+  ));
+  if (totalFrames === 0) return;
+
+  const audioEncoder = new AudioEncoder({
+    output: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
+    error: (e) => setStatus("Audio encoder error: " + e.message, true),
+  });
+  audioEncoder.configure({
+    codec: "mp4a.40.2",   // AAC-LC
+    sampleRate,
+    numberOfChannels: channels,
+    bitrate: 128000,
+  });
+
+  const CHUNK_FRAMES = 4096;
+  const channelData = Array.from({ length: channels }, (_, ch) => audioBuffer.getChannelData(ch));
+  for (let start = 0; start < totalFrames; start += CHUNK_FRAMES) {
+    const frames = Math.min(CHUNK_FRAMES, totalFrames - start);
+    // f32-planar: each channel's samples laid out contiguously, one after another
+    const planar = new Float32Array(frames * channels);
+    for (let ch = 0; ch < channels; ch++) {
+      planar.set(channelData[ch].subarray(start, start + frames), ch * frames);
+    }
+    const audioData = new AudioData({
+      format: "f32-planar",
+      sampleRate,
+      numberOfFrames: frames,
+      numberOfChannels: channels,
+      timestamp: Math.round((start / sampleRate) * 1e6),
+      data: planar,
+    });
+    audioEncoder.encode(audioData);
+    audioData.close();
+  }
+  await audioEncoder.flush();
+  audioEncoder.close();
+}
+
 $("render").onclick = async () => {
   if (!mesh) { setStatus("Load a splat first.", true); return; }
   if (correcting) { setStatus("Exit Correct mode before rendering.", true); return; }
@@ -3238,11 +3297,22 @@ $("render").onclick = async () => {
   $("render").classList.add("live");
   $("t-state").textContent = "rendering";
 
+  /* Audio is included automatically whenever a track is loaded — no
+     separate toggle. AudioEncoder support is checked here rather than
+     added to the CAN_EXPORT gate at the top: its absence (Firefox, Safari)
+     should silently fall back to a video-only export, not block Render
+     the way missing VideoEncoder does. */
+  const includeAudio = !!audioBuffer && typeof AudioEncoder !== "undefined";
+  if (audioBuffer && !includeAudio) {
+    setStatus("This browser can't encode audio (no WebCodecs AudioEncoder) — exporting video only.", true);
+  }
+
   let encoder = null;
   try {
     const muxer = new Muxer({
       target: new ArrayBufferTarget(),
       video: { codec: "avc", width: w, height: h, frameRate: fps },
+      ...(includeAudio ? { audio: { codec: "aac", numberOfChannels: audioBuffer.numberOfChannels, sampleRate: audioBuffer.sampleRate } } : {}),
       fastStart: "in-memory",
     });
     encoder = new VideoEncoder({
@@ -3313,6 +3383,12 @@ $("render").onclick = async () => {
     }
 
     await encoder.flush();
+
+    if (includeAudio) {
+      setStatus(`Encoding audio…`);
+      await encodeAudioTrack(muxer, P.dur);
+    }
+
     muxer.finalize();
     const blob = new Blob([muxer.target.buffer], { type: "video/mp4" });
     const a = document.createElement("a");
@@ -3320,7 +3396,7 @@ $("render").onclick = async () => {
     a.download = `splat-bench-${Date.now()}.mp4`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 10000);
-    setStatus(`Rendered ${total} frames — ${(blob.size / 1e6).toFixed(1)} MB.`);
+    setStatus(`Rendered ${total} frames${includeAudio ? " + audio" : ""} — ${(blob.size / 1e6).toFixed(1)} MB.`);
   } catch (err) {
     console.error(err);
     setStatus("Render failed: " + err.message, true);
@@ -3960,7 +4036,7 @@ $("audMute").onclick = () => {
 
 $("audClear").onclick = () => {
   if (audioEl) { audioEl.pause(); URL.revokeObjectURL(audioEl.src); audioEl = null; }
-  audioEnv = null; audioName = null; audioDur = 0;
+  audioEnv = null; audioName = null; audioDur = 0; audioBuffer = null;
   shapeCache.clear();
   for (const band of Object.keys(BANDS)) audioLevel[band] = 0;
   $("audName").textContent = "no audio loaded";
@@ -4025,6 +4101,8 @@ if (new URLSearchParams(location.search).has("debug")) {
     get audioEnv(){ return audioEnv; },
     get AUD(){ return AUD; },
     get audioDur(){ return audioDur; },
+    get audioBuffer(){ return audioBuffer; },
+    encodeAudioTrack,
     shapedEnvelope,
     routeLevel,
     get shapeCache(){ return shapeCache; },
