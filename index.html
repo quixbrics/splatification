@@ -689,6 +689,25 @@
       <input type="range" id="p-dpFar" min="0" max="8" step="0.02" value="3"></div>
   </details>
 
+  <details class="mod" data-group="dof">
+    <summary>Depth of field <em>lens blur</em><i class="gflag"></i></summary>
+    <p style="color:var(--ink-dim); margin:0 0 8px">Spark's own per-splat circle-of-confusion blur — a defocused splat is exactly another (wider, dimmer) Gaussian, so this composites correctly through the existing sort with no special handling. No effect at Aperture 0.</p>
+    <div class="btns" style="margin-bottom:9px">
+      <select id="dofFocusSrc" title="Manual: use the Focus slider below. Region: track that slot's centre distance from the camera every frame, so moving or animating the region pulls focus.">
+        <option value="manual" selected>Manual focus</option>
+        <option value="1">Focus-pull: Region 1</option>
+        <option value="2">Focus-pull: Region 2</option>
+        <option value="3">Focus-pull: Region 3</option>
+        <option value="4">Focus-pull: Region 4</option>
+      </select>
+    </div>
+    <div class="row"><label>Focus</label><output id="o-dofFocus">—</output>
+      <input type="range" id="p-dofFocus" min="0" max="8" step="0.02" value="2"></div>
+    <div class="row"><label>Aperture</label><output id="o-dofAperture">—</output>
+      <input type="range" id="p-dofAperture" min="0" max="30" step="0.1" value="0"></div>
+    <p style="color:var(--ink-dim); margin:8px 0 0">Gaussian bokeh only — no aperture shape, no cat's-eye, no shaped highlight discs. Those need a custom splat shader; out of scope here.</p>
+  </details>
+
   <details class="mod" data-group="colour">
     <summary>Colour <em>tint + saturation</em><i class="gflag"></i></summary>
     <div class="row"><label>Brightness</label><output id="o-bright">—</output>
@@ -911,12 +930,24 @@ function applyBgColor() {
 }
 $("bgColor").onchange = applyBgColor;
 for (const id of ["dField", "dcMode", "dcAxis", "qAxis", "wMode", "dpMode"]) $(id).onchange = () => pushUniforms();
+$("dofFocusSrc").onchange = () => updateDofFocus();
 
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(50, 1, 0.01, 1000);
 camera.position.set(0, 0, 3);
 
-const spark = new SparkRenderer({ renderer });
+/* blurAmount:0 — a real, unplanned finding from Phase 5's own investigation
+   (DEV_PLAN_EFFECTS.md), not a Phase 5 feature. SparkRenderer's own default
+   is blurAmount: 0.3 (undocumented in this app, never touched before now),
+   a constant circle-of-confusion-space term added to EVERY splat's
+   projected 2D covariance on EVERY frame, unconditionally — it has been
+   softening and dimming every render for the whole life of this file.
+   Measured impact on the loaded butterfly.spz: coverage 4.29 -> 4.17,
+   mean R 112.57 -> 115.21 with it zeroed. Small, but real and systematic,
+   and it directly contradicts every "baseline" measurement in NOTES
+   describing a clean, unblurred render. Explicit 0 here makes that true.
+   Depth of field (below) is the ONLY intentional source of blur now. */
+const spark = new SparkRenderer({ renderer, blurAmount: 0 });
 scene.add(spark);
 
 const controls = new OrbitControls(camera, renderer.domElement);
@@ -1510,6 +1541,7 @@ const SPEC = [
   ["qStrat", 2, "quantise"], ["qPoster", 2, "quantise"],
   ["wAmt", 2, "wave"], ["wFreq", 2, "wave"], ["wSpd", 2, "wave"],
   ["dpAmt", 2, "depth"], ["dpNear", 2, "depth"], ["dpFar", 2, "depth"],
+  ["dofFocus", 2, "dof"], ["dofAperture", 1, "dof"],
   ["bright", 2, "colour"],
   ["tR", 2, "colour"], ["tG", 2, "colour"], ["tB", 2, "colour"],
   ["sat", 2, "colour"],
@@ -2969,6 +3001,43 @@ function pushCameraUniform() {
   mesh.updateVersion();
 }
 
+/* Depth of field (Phase 5). `spark.focalDistance`/`spark.apertureAngle` are
+   plain SparkRenderer properties, read into its OWN uniforms every frame as
+   part of its normal per-frame sync — unlike U.camPosLocal above, this is
+   NOT part of the generate/bake pass Spark gates on `viewChanged || version
+   changed`, so it needs no `mesh.updateVersion()` and has no one-frame-lag
+   hazard to guard against; setting it right before render() is sufficient.
+   Still called every frame, same as pushCameraUniform(), because Focus-pull
+   mode depends on the camera's current position, which can change without
+   pushUniforms() ever running (manual orbit while paused — see Phase 1).
+
+   focalDistance is measured the same way Phase 4's planar depth fade is: a
+   positive distance along the camera's OWN view axis, not straight-line —
+   confirmed by reading spark.module.js's own vertex shader (`abs((-view
+   Center.z - focalDistance) / viewCenter.z)`). Focus-pull to a region
+   computes exactly that projection in world space, reusing nothing from
+   Phase 4's object-space uniforms since this lives on the renderer, not the
+   mesh's dyno graph. */
+function updateDofFocus() {
+  /* V, not P — V is the EFFECTIVE value (envelope- or audio-driven when
+     active, P otherwise), same distinction pushUniforms() makes for every
+     other parameter. Reading P here would silently ignore a Focus envelope
+     or a region-position envelope: the slider's raw value, not what the
+     timeline is actually driving. */
+  spark.apertureAngle = V.dofAperture * (Math.PI / 180);
+  const src = $("dofFocusSrc").value;
+  if (src === "manual" || !mesh) {
+    spark.focalDistance = V.dofFocus * radius;
+    return;
+  }
+  const n = src;
+  const localPos = new THREE.Vector3(V[`rg${n}X`] * radius, V[`rg${n}Y`] * radius, V[`rg${n}Z`] * radius);
+  const worldPos = mesh.localToWorld(localPos);
+  const camForward = camera.getWorldDirection(new THREE.Vector3());
+  const toRegion = worldPos.sub(camera.position);
+  spark.focalDistance = Math.max(toRegion.dot(camForward), 0);
+}
+
 function setCamMode(mode) {
   camMode = mode;
   for (const b of document.querySelectorAll("#camModeBtns button")) {
@@ -3122,6 +3191,7 @@ function frame(now) {
   updateCamDirty();
   controls.update();
   pushCameraUniform();    // AFTER controls.update() — must see this frame's final camera pose, not last frame's
+  updateDofFocus();
   renderer.render(scene, camera);
 }
 
@@ -3213,6 +3283,7 @@ $("render").onclick = async () => {
       driveCamera();
       controls.update();
       pushCameraUniform();   // AFTER driveCamera()/controls.update() — see the live loop's own note
+      updateDofFocus();
 
       /* Spark sorts splats asynchronously off a GPU readback, so a frame
          rendered straight after a camera move can blend in stale order.
@@ -3282,7 +3353,7 @@ const PRESET_VERSION = 5;   // v2 selects; v3 audio; v4 regions+mask; v5 camera 
    sitting at, not of the look. A preset saved on a desktop must not force a
    phone back to full pixel ratio, nor the reverse. */
 const TOGGLES = ["useLod"];
-const SELECTS = ["res", "fps", "obAxis", "bgColor", "dField", "dcMode", "dcAxis", "qAxis", "wMode", "dpMode"];
+const SELECTS = ["res", "fps", "obAxis", "bgColor", "dField", "dcMode", "dcAxis", "qAxis", "wMode", "dpMode", "dofFocusSrc"];
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 function serialize() {
@@ -3992,6 +4063,8 @@ if (new URLSearchParams(location.search).has("debug")) {
     set playing(v){ playing = v; },
     get bgColor(){ return $("bgColor").value; },
     pushCameraUniform,
+    updateDofFocus,
+    spark,
     /* Every coverage figure in NOTES was measured against "void". Both probe
        helpers below force it for their own duration regardless of what the
        UI has selected, and restore whatever was there before — a probe run
@@ -4006,6 +4079,7 @@ if (new URLSearchParams(location.search).has("debug")) {
       driveCamera();
       controls.update();
       pushCameraUniform();
+      updateDofFocus();
       renderer.render(scene, camera);
       renderer.setClearColor(saved, 1);
     },
@@ -4018,6 +4092,7 @@ if (new URLSearchParams(location.search).has("debug")) {
         driveCamera();
         controls.update();
         pushCameraUniform();
+        updateDofFocus();
         renderer.render(scene, camera);
         await spark.update({ scene, camera });
         renderer.render(scene, camera);

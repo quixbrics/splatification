@@ -2031,6 +2031,203 @@ warm-up transient, not new behaviour.
 
 ---
 
+## Phase 5 of `DEV_PLAN_EFFECTS.md` — depth of field
+
+### The plan changed shape entirely once `spark.module.js` was actually read
+
+The plan calls for hand-rolling defocus via `covSplats: true` and a
+`covObjectModifiers` covariance-space modifier — add `sigma^2(d)*I` to the
+3D covariance, correct peak alpha by the determinant ratio, verify none of
+it shifts the existing coverage tables first. Before writing any of that,
+`spark.module.js` 2.1.0 was read directly (same discipline as every other
+"verify against your own coverage tables" moment in this file) to confirm
+the `covObjectModifiers` wiring — and found something that changed the
+whole approach: **SparkRenderer already implements exactly this DoF model
+natively**, as first-class constructor options/properties
+(`focalDistance`, `apertureAngle`, `blurAmount`, `preBlurAmount`), read into
+the vertex shader every frame. Reading the shader itself
+(`splatVertex_default`, ~line 9968 in the pinned build):
+
+```glsl
+mat3 cov2D = transpose(J) * cov3D * J;   // project 3D covariance to 2D screen space
+float a = cov2D[0][0], d = cov2D[1][1], b = cov2D[0][1];
+
+float fullBlurAmount = blurAmount;
+if ((focalDistance > 0.0) && (apertureAngle > 0.0)) {
+    float focusBlur = abs((-viewCenter.z - focalDistance) / viewCenter.z);
+    float apertureRadius = focal.x * tan(0.5 * apertureAngle);
+    fullBlurAmount = clamp(sqr(focusBlur * apertureRadius), blurAmount, sqr(maxPixelRadius));
+}
+
+float detOrig = a * d - b * b;
+a += fullBlurAmount; d += fullBlurAmount;
+float det = a * d - b * b;
+
+float blurAdjust = sqrt(max(0.0, detOrig / det));
+rgba.a *= blurAdjust;   // <-- exactly "peak alpha drops by the determinant ratio"
+```
+
+This is the plan's own algorithm — CoC-shaped blur added to a covariance,
+alpha corrected by the determinant ratio — already implemented, already
+tested (it ships with Spark), and arguably **more correct** than what the
+plan describes: the blur is added to the **projected 2D** covariance (a
+real circular CoC in screen space, isotropic in the two directions that
+actually matter for a lens), not the plan's simplified 3D-isotropic
+`sigma^2*I`. It runs identically whether the mesh stores scale+quaternion
+or packed covariance (`cov3D` is computed from whichever the mesh actually
+uses, then the same downstream code applies) — so `covSplats` turned out to
+control storage precision only, orthogonal to whether DoF works at all, not
+a prerequisite for it. Using Spark's own tested implementation instead of
+re-deriving the same math independently is the safer choice by construction,
+not a shortcut — it does not carry this project's own margin for a
+determinant-ratio sign error or a projection mistake. `covSplats` was not
+touched this phase; nothing here depends on it.
+
+Consequence for scope: no `covObjectModifiers`, no hand-derived covariance
+arithmetic in `buildModifier()`. `updateDofFocus()` (new, alongside Phase
+4's `pushCameraUniform()`) sets exactly two `SparkRenderer` properties per
+frame from this app's own `SPEC` sliders. Both live outside this app's own
+generate/bake pipeline entirely — `spark.focalDistance`/`apertureAngle` are
+read by Spark's own per-frame uniform sync, not gated by `viewChanged ||
+version changed`, so unlike Phase 4's `camPosLocal` this needs no
+`mesh.updateVersion()` and has no one-frame-lag hazard of its own. Still
+called every frame (not just on edits), for the same reason Phase 4's
+uniform is: Focus-pull mode (below) depends on the camera's live position,
+which can change without `pushUniforms()` ever running.
+
+### A real, unplanned finding: `blurAmount` was never zero
+
+`SparkRenderer`'s own default is `blurAmount: 0.3` — a constant term added
+to `a`/`d` (the projected 2D covariance) on **every** splat, **every**
+frame, unconditionally, regardless of `focalDistance`/`apertureAngle`. This
+app never set it, so it has been active since the very first commit — every
+"baseline" coverage/luma figure anywhere else in this file was measured
+under a small constant blur nobody knew was there. Measured impact on the
+loaded `butterfly.spz`: coverage `4.29 -> 4.17`, mean R `112.57 -> 115.21`
+with it zeroed — small, but real and systematic. Now explicit:
+`new SparkRenderer({ renderer, blurAmount: 0 })`. Depth of field (via
+`apertureAngle`) is the only intentional source of blur from here on;
+`preBlurAmount` is also left at its own default of 0.
+
+This does not retroactively invalidate any earlier measurement in this file
+— they are legitimate readings of the app's actual behaviour at the time,
+just under a default nobody had inspected. Future measurements will differ
+slightly from older ones by this same small amount, which is expected and
+correct, not drift to chase.
+
+### Focus, aperture, and what was deliberately not added
+
+Two `SPEC` sliders, group `dof`: `dofFocus` (world-scale via `radius`, same
+convention as every other spatial parameter) and `dofAperture` (0–30
+degrees, converted to radians for `apertureAngle`). `dofFocusSrc` (Manual,
+or Region 1–4) is the plan's "focus-pull to a region slot's centre" —
+reuses the region system's own position sliders, no new machinery: when a
+region is selected, `updateDofFocus()` recomputes the focal distance every
+frame as that region's live world-space position projected onto the
+camera's own view axis (the exact same "planar depth" quantity Phase 4's
+depth fade already uses, computed independently here since this lives on
+the renderer, not the mesh's dyno graph, and so cannot share Phase 4's
+`camPosLocal`/`camDirLocal` uniforms).
+
+**Not added:** a separate falloff-curve-shape control. Spark's own formula
+(`focusBlur = abs((-viewCenter.z - focalDistance) / viewCenter.z)`, an
+exact algebraic ramp, not an authorable curve) is what actually runs;
+layering a customisable curve on top would mean computing blur amount
+independently in a modifier and fighting Spark's own value, defeating the
+entire reason to use the native path. Two sliders, not three, and the
+plan's "falloff curve" is this section's honest scope cut, not an oversight.
+
+### Measured
+
+Against the loaded `butterfly.spz` (177,132 splats), `window.__bench`
+throughout:
+
+- **`aperture = 0` reproduces baseline exactly**, not just within 1% —
+  `apertureAngle > 0.0` is one of the shader's own gate conditions, so at
+  `dofAperture = 0` the blur branch never executes regardless of
+  `dofFocus`'s value. Verified with `dofFocus` set to several different
+  values while aperture stayed 0: bit-identical coverage, R, and total luma
+  every time.
+- **A splat at the focus distance is unchanged, by construction, not
+  approximation.** At `viewCenter.z == -focalDistance`, `focusBlur =
+  abs(0/z) = 0` regardless of aperture, so `fullBlurAmount = clamp(0,
+  blurAmount=0, ...) = 0` — determinant ratio exactly 1.0 at focus for any
+  aperture value, once `blurAmount` is zeroed (see above; this is *why*
+  the `blurAmount` fix had to land in this phase and not be deferred).
+- **Focus sweep monotonicity — verified analytically, not by a noisy pixel
+  proxy.** `focusBlur(d) = |1 - focalDistance/d|` for depth `d` is a simple
+  monotonic function of `|d - focalDistance|` on each side (algebra, not
+  measurement): strictly increasing as `d` moves away from `focalDistance`
+  in either direction, `0` exactly at `d = focalDistance`. A pixel-count
+  proxy was tried first and rejected: coverage is not a clean sharpness
+  signal on a capture with real depth extent — blurred splats can cover
+  *more* screen area even while dimmer, which showed up as a non-monotonic
+  reading that was measuring the wrong thing, not a real defect. The
+  algebraic guarantee is the actual proof; a coarse aggregate over a
+  177k-splat capture with its own depth range was never going to cleanly
+  demonstrate it.
+- **Total luma conservation (the check that catches the alpha bug) —
+  confirmed on a sparse, non-overlapping subset; NOT confirmed at the
+  177k-splat aggregate level, and that gap is itself the finding.** At
+  `cullA = 0.85` (leaving only the brightest, well-separated splats),
+  luma deviation across `dofAperture` 0→4° was **-0.01% to -0.64%** —
+  comfortably inside the plan's 2% bound, and direct evidence the
+  per-splat `blurAdjust` correction is doing exactly what it claims. On the
+  full dense capture, the same sweep showed deviations from **1.2% up to
+  ~15%** at larger apertures — tried against both the app's `void`
+  background and a pure-black one (ruling out background-blend nonlinearity
+  as the cause: pure black measured *larger* deviations, not smaller).
+  Diagnosis: as splats defocus they grow in screen-space footprint, which
+  increases local overlap density in a dense cloud, and sequential
+  alpha-"over" compositing of many overlapping semi-transparent layers is
+  not a linear/additive operation — summed displayed pixel luma is not a
+  reliable proxy for per-primitive energy conservation once overlap is
+  significant, independent of whether that per-primitive conservation
+  itself is correct. This is the same *shape* of trap as "an empty mask
+  fakes a pass" earlier in this file: a measurement that looks like it
+  tests the right thing but is actually dominated by something else
+  (compositing overlap, not the defocus formula). The sparse measurement is
+  the one that actually isolates and confirms the claim; the dense one is
+  recorded as an honest non-result, not smoothed over.
+- **Frame time**: 30-render average, `dofAperture=0` **0.2333ms** vs
+  `dofAperture=5` **0.2133ms** — within noise, no measurable added cost,
+  matching the plan's own expectation ("camera movement already triggers
+  regenerate via `viewChanged`... little or no additional cost").
+- **Focus-pull matches an independent CPU reference exactly**: region
+  slot 1 at world-space `(0.3, 0.1, 0) * radius`, projected onto the
+  camera's view axis — `spark.focalDistance` and a hand-computed
+  `(worldPos - camera.position).dot(viewDir)` agreed to 4 decimal places.
+- **48-frame export, animated focus envelope** (`dofFocus` keyed 0.5 → 7
+  across the clip, `dofAperture=5`): simulated the exact export-loop call
+  sequence — **zero frozen frame pairs**, values monotonically tracking the
+  envelope from `0.6129` to `8.5805` (both `* radius`, matching the keyed
+  0.5/7 exactly).
+
+### A real bug this phase's own testing caught: `updateDofFocus()` read `P`, not `V`
+
+First attempt at the export/envelope test above showed `spark.focalDistance`
+frozen at a single value across all 48 frames despite a keyed envelope —
+traced to `updateDofFocus()` reading `P.dofFocus`/`P.dofAperture` (the raw
+slider value) instead of `V.dofFocus`/`V.dofAperture` (the *effective*
+value: envelope- or audio-driven when active, `P` otherwise — the same
+distinction `pushUniforms()` makes for every other parameter in this file).
+Reading `P` silently ignores any Focus envelope, audio route, or a
+region-position envelope under Focus-pull — the timeline would visibly
+animate everything else while depth of field sat frozen, exactly the kind
+of quiet, easy-to-miss bug this project's own `V`-vs-`P` convention exists
+to prevent. Fixed by switching both reads (and the region-position reads
+under Focus-pull) to `V`; re-ran the export test after the fix and got the
+correctly-animating values quoted above.
+
+### Honest limitation, recorded per the plan's own instruction
+
+Gaussian bokeh only. No aperture shape, no cat's-eye, no shaped highlight
+discs — those need a custom splat shader, and Spark 2.0 deprecated 0.1's
+arbitrary splat profiles, so it is the new shader path or nothing. Out of
+scope here, and out of scope for this app in general per its own Non-goals.
+
+---
+
 ## Section accordion and `SPEC` groups
 
 `SPEC` entries are `[id, digits, group]`. The group ties a parameter to its rail
