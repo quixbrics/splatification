@@ -186,6 +186,32 @@ thousandths — the browser silently snapped it to 0.151, and the panel had been
 displaying 0.151 for a declared 0.15 since the beginning. Step is now `0.001`.
 This was found by the reset round-trip test, not by reading the markup.
 
+**Audio never came back after the first loop, whenever the clip is shorter
+than the timeline `dur`.** User-reported, reproduced exactly. `<audio>`
+doesn't loop on its own (`.loop` is never set), so once playback runs past the
+clip's own length the browser auto-pauses it. The loop-boundary code in
+`frame()` (`if (playhead < prev) audioSeek();`) only repositioned
+`currentTime` — `audioSeek()` never calls `.play()`, only `audioFollow()`
+does that, and nothing was calling `audioFollow()` there. So the element sat
+correctly-seeked-but-paused for the rest of the session; only a manual
+Play/Pause toggle (which does call `audioFollow()`) could ever restart it.
+
+Fixed by calling both on loop: `audioSeek()` first (still needed on its own
+for the *opposite* case — a clip LONGER than `dur`, where `<audio>` never
+reaches its own end and so is still mid-playback, unpaused, and needs
+repositioning back to the loop point or it drifts forward out of sync with
+the visual loop), then `audioFollow()` (to resume playback if the clip had
+auto-paused at its own end). Verified both directions directly against a real
+`<audio>` element and the real 6s `bandtest.wav` fixture via `window.__bench`:
+simulating the browser's own auto-pause-at-end (`audio.pause()` at
+`currentTime = 5.99` with `dur = 10`) followed by the loop-boundary call
+sequence resulted in `paused: false, currentTime: ~0.1` — playback resumed.
+Repeating with only the old `audioSeek()` call reproduced the bug exactly:
+`paused: true` (correctly repositioned, never restarted) — confirming this
+was a real regression path, not a hypothetical. The longer-than-timeline case
+(`dur = 3`, audio mid-playback at `currentTime = 2.5`, never paused) also
+resynced correctly after the fix: `paused: false, currentTime: ~0.03`.
+
 ---
 
 ## Per-parameter reset

@@ -2676,7 +2676,14 @@ function frame(now) {
   if (playing) {
     const prev = playhead;
     playhead = (playhead + dt / P.dur) % 1;
-    if (playhead < prev) audioSeek();        // looped — pull audio back with it
+    if (playhead < prev) {                   // looped
+      audioSeek();      // always resync position — needed when the clip is LONGER than the
+                         // timeline, where <audio> never reaches its own end and so was still
+                         // mid-playback, unpaused, drifting forward past the visual loop point
+      audioFollow();     // and restart it if the clip is SHORTER than the timeline: the browser
+                         // auto-pauses <audio> at its own end, and audioSeek() alone does not
+                         // resume playback, only audioFollow() does
+    }
     $("scrub").value = playhead;
     pushUniforms();
     updateClock();
@@ -3553,6 +3560,11 @@ if (new URLSearchParams(location.search).has("debug")) {
     audOf,
     get focused(){ return focused; },
     get camKeyDrag(){ return camKeyDrag; },
+    loadAudio,
+    audioSeek,
+    audioFollow,
+    get playing(){ return playing; },
+    set playing(v){ playing = v; },
     get bgColor(){ return $("bgColor").value; },
     /* Every coverage figure in NOTES was measured against "void". Both probe
        helpers below force it for their own duration regardless of what the
