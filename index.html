@@ -728,6 +728,15 @@
     <p style="color:var(--ink-dim); margin:8px 0 0">Gaussian bokeh only — no aperture shape, no cat's-eye, no shaped highlight discs. Those need a custom splat shader; out of scope here.</p>
   </details>
 
+  <details class="mod" data-group="smear">
+    <summary>Smear <em>screen-space streak</em><i class="gflag"></i></summary>
+    <p style="color:var(--ink-dim); margin:0 0 8px">Stretches each splat's own projected shape along a fixed screen-space direction — the same covariance-plus-energy-correction machinery Depth of field uses, so the two compose. Screen-space, not per-splat: a uniform streak direction, not each splat's own motion. No effect at Amount 0.</p>
+    <div class="row"><label>Amount</label><output id="o-smearAmt">—</output>
+      <input type="range" id="p-smearAmt" min="0" max="2000" step="5" value="0"></div>
+    <div class="row"><label>Angle</label><output id="o-smearAngle">—</output>
+      <input type="range" id="p-smearAngle" min="0" max="180" step="1" value="0"></div>
+  </details>
+
   <details class="mod" data-group="colour">
     <summary>Colour <em>tint + saturation</em><i class="gflag"></i></summary>
     <div class="row"><label>Brightness</label><output id="o-bright">—</output>
@@ -977,8 +986,68 @@ camera.position.set(0, 0, 3);
    mean R 112.57 -> 115.21 with it zeroed. Small, but real and systematic,
    and it directly contradicts every "baseline" measurement in NOTES
    describing a clean, unblurred render. Explicit 0 here makes that true.
-   Depth of field (below) is the ONLY intentional source of blur now. */
-const spark = new SparkRenderer({ renderer, blurAmount: 0 });
+   Depth of field (above) is the other intentional source of blur; smear
+   (below) is the third and last. */
+
+/* Anisotropic smear (B1 of DEV_PLAN_EFFECTS.md's successor plan) — spike
+   finding: Spark 2.1.0's SparkRenderer constructor is a genuine, first-
+   class hook (`options.vertexShader`, `options.extraUniforms`), NOT
+   something requiring a private/undocumented workaround — but it IS whole-
+   file string replacement, not a template with injection points (the
+   compute shaders elsewhere in spark.module.js use `{{ GLOBALS }}` /
+   `{{ STATEMENTS }}` placeholders; `splatVertex_default` has none). That
+   pins this feature to the exact text of Spark 2.1.0's vertex shader — see
+   NOTES "Anisotropic smear" for why this is recorded as a real upgrade
+   hazard, not a footnote.
+
+   The base shader text is read at RUNTIME from a throwaway probe
+   SparkRenderer's own `material.vertexShader` — never hand-transcribed
+   into this file — so this is self-verifying against whichever exact
+   spark.module.js build is actually loaded: if a future version renames or
+   restructures the two anchor lines below, `buildSmearVertexShader` throws
+   immediately at boot instead of silently compiling a shader that does not
+   do what this file thinks it does. */
+function buildSmearVertexShader(base) {
+  const uniformAnchor = "uniform float apertureAngle;";
+  const logicAnchor = "float detOrig = a * d - b * b;";
+  if (base.indexOf(uniformAnchor) === -1 || base.indexOf(logicAnchor) === -1) {
+    throw new Error(
+      "Anisotropic smear: Spark's vertex shader no longer contains the expected anchor text — " +
+      "spark.module.js version drift. See NOTES 'Anisotropic smear' before touching this.",
+    );
+  }
+  return base
+    .replace(uniformAnchor, `${uniformAnchor}\nuniform float smearAmt;\nuniform float smearAngle;`)
+    /* Composition with DoF, per the plan: detOrig is computed ONCE, from the
+       covariance before either intentional-blur term; smear's anisotropic
+       term is added to a/b/d alongside DoF's isotropic fullBlurAmount,
+       BEFORE the single det/blurAdjust computation that already exists
+       immediately below this anchor — so one energy correction covers both
+       effects together, never two corrections compounding into extra
+       darkening. Gated on smearAmt > 0.0 exactly as DoF gates on
+       apertureAngle > 0.0, so 0 is the shader's own no-op branch, not an
+       approximately-zero blur term. */
+    .replace(logicAnchor, `${logicAnchor}
+    if (smearAmt > 0.0) {
+        float smearRad = radians(smearAngle);
+        vec2 smearDir = vec2(cos(smearRad), sin(smearRad));
+        a += smearAmt * smearDir.x * smearDir.x;
+        b += smearAmt * smearDir.x * smearDir.y;
+        d += smearAmt * smearDir.y * smearDir.y;
+    }`);
+}
+const _smearProbe = new SparkRenderer({ renderer });
+const SMEAR_VERTEX_SHADER = buildSmearVertexShader(_smearProbe.material.vertexShader);
+
+const spark = new SparkRenderer({
+  renderer,
+  blurAmount: 0,
+  vertexShader: SMEAR_VERTEX_SHADER,
+  extraUniforms: {
+    smearAmt: { value: 0 },
+    smearAngle: { value: 0 },
+  },
+});
 scene.add(spark);
 
 const controls = new OrbitControls(camera, renderer.domElement);
@@ -1573,6 +1642,7 @@ const SPEC = [
   ["wAmt", 2, "wave"], ["wFreq", 2, "wave"], ["wSpd", 2, "wave"],
   ["dpAmt", 2, "depth"], ["dpNear", 2, "depth"], ["dpFar", 2, "depth"],
   ["dofFocus", 2, "dof"], ["dofAperture", 1, "dof"],
+  ["smearAmt", 1, "smear"], ["smearAngle", 0, "smear"],
   ["bright", 2, "colour"],
   ["tR", 2, "colour"], ["tG", 2, "colour"], ["tB", 2, "colour"],
   ["sat", 2, "colour"],
@@ -3105,6 +3175,24 @@ function updateDofFocus() {
   spark.focalDistance = Math.max(toRegion.dot(camForward), 0);
 }
 
+/* Anisotropic smear — same per-frame-property discipline as updateDofFocus()
+   just above, and for the same reason: smearAmt/smearAngle can be envelope-
+   or audio-driven, so V (not P) has to be read fresh regardless of whether
+   pushUniforms() ran this exact frame. Unlike U.* uniforms elsewhere in this
+   file, spark.material.uniforms.* are NOT part of the generate/bake pass
+   Spark gates on `viewChanged || version changed` — THREE re-uploads a
+   ShaderMaterial's changed uniforms on every draw call regardless — so, like
+   dofFocus/dofAperture, this needs no mesh.updateVersion() and has no one-
+   frame-lag hazard of its own. smearAngle is passed in degrees, unconverted
+   — the shader's own `radians()` call does that, matching how dofAperture is
+   converted in JS instead only because Spark's OWN apertureAngle property
+   expects radians (a difference in the two uniforms' own external contracts,
+   not an inconsistency in this file). */
+function updateSmear() {
+  spark.material.uniforms.smearAmt.value = V.smearAmt;
+  spark.material.uniforms.smearAngle.value = V.smearAngle;
+}
+
 function setCamMode(mode) {
   camMode = mode;
   for (const b of document.querySelectorAll("#camModeBtns button")) {
@@ -3259,6 +3347,7 @@ function frame(now) {
   controls.update();
   pushCameraUniform();    // AFTER controls.update() — must see this frame's final camera pose, not last frame's
   updateDofFocus();
+  updateSmear();
   renderer.render(scene, camera);
 }
 
@@ -3419,6 +3508,7 @@ $("render").onclick = async () => {
       controls.update();
       pushCameraUniform();   // AFTER driveCamera()/controls.update() — see the live loop's own note
       updateDofFocus();
+      updateSmear();
 
       /* Spark sorts splats asynchronously off a GPU readback, so a frame
          rendered straight after a camera move can blend in stale order.
@@ -4292,6 +4382,8 @@ if (new URLSearchParams(location.search).has("debug")) {
     get bgColor(){ return $("bgColor").value; },
     pushCameraUniform,
     updateDofFocus,
+    updateSmear,
+    get smearVertexShader(){ return SMEAR_VERTEX_SHADER; },
     spark,
     /* Every coverage figure in NOTES was measured against "void". Both probe
        helpers below force it for their own duration regardless of what the
@@ -4308,6 +4400,7 @@ if (new URLSearchParams(location.search).has("debug")) {
       controls.update();
       pushCameraUniform();
       updateDofFocus();
+      updateSmear();
       renderer.render(scene, camera);
       renderer.setClearColor(saved, 1);
     },
@@ -4321,6 +4414,7 @@ if (new URLSearchParams(location.search).has("debug")) {
         controls.update();
         pushCameraUniform();
         updateDofFocus();
+        updateSmear();
         renderer.render(scene, camera);
         await spark.update({ scene, camera });
         renderer.render(scene, camera);

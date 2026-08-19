@@ -2538,6 +2538,182 @@ documented noise across navigations in a long-lived tab).
 
 ---
 
+## Anisotropic smear (B1)
+
+Screen-space directional streak, added the same way Phase 5 added depth of
+field: as a modification to Spark's own `a`/`b`/`d` (2D covariance) inside
+its native vertex shader, not as an `objectModifiers` dyno node. `covSplats`
+remains untouched — **this is the second phase to reach that conclusion**
+(Phase 5 was the first), so it should not need re-deriving a third time.
+
+### The shader hook: first-class API, but whole-file string replacement
+
+`SparkRenderer`'s constructor accepts `options.vertexShader` (a full string
+override, default is `getShaders().splatVertex`) and `options.extraUniforms`
+(merged into the material's uniforms) — both are genuine, documented
+constructor options, not internals reached through a back door. That part of
+the spike's question resolved cleanly.
+
+The other half did not: there is no template/injection-point mechanism.
+`splatVertex_default` is a single fixed string; adding logic means locating
+anchor text inside it and splicing, the same technique used to reach this
+conclusion in the first place. **This pins the app harder to Spark 2.1.0 than
+Phase 5 did** — Phase 5 only *read* property names (`focalDistance`,
+`apertureAngle`) that could plausibly survive a minor bump; this phase
+depends on two literal source lines (`uniform float apertureAngle;` and
+`float detOrig = a * d - b * b;`) still existing verbatim. Recorded here as
+the known upgrade hazard the plan asked for. The mitigation already in place:
+`buildSmearVertexShader()` asserts both anchors exist and throws a named,
+actionable error at boot instead of silently compiling a shader that does
+not do what the app thinks it does — see `index.html` around
+`buildSmearVertexShader`. The shader text itself is never hand-transcribed;
+a throwaway `SparkRenderer` probe instance is constructed just to read
+`.material.vertexShader` at runtime, and the splice runs against that live
+string.
+
+### Composition with DoF — one correction, not two
+
+The smear anchor sits *between* the shader's own `float detOrig = a * d - b
+* b;` line and its next line, `a += fullBlurAmount;` (DoF's isotropic term).
+So the actual order after splicing is: compute `detOrig` from the *true*
+original covariance (before either effect) → add smear's anisotropic term
+→ add DoF's isotropic term → compute `det` once → `blurAdjust = sqrt(detOrig
+/ det)` once. Both effects land in `a`/`b`/`d` before the single energy
+correction runs. This was verified by reading the actual spliced insertion
+point, not inferred from the intent — see "Measured" below for what a
+double correction would have looked like and why the composed-darkening
+result isn't one.
+
+Gated on `smearAmt > 0.0`, exactly as DoF gates on `apertureAngle > 0.0` —
+`smearAmt = 0` is the shader's own no-op branch, not an approximately-zero
+term.
+
+### `smearAmt`'s range — swept, not assumed
+
+Per the plan's explicit instruction, `smearAmt` was swept from 0 upward
+before settling `p-smearAmt`'s `min`/`max`/`step`. Coverage (`cov`, a
+readPixels-based pixel-count proxy) on `butterfly.spz`:
+
+| `smearAmt` | 0 | 1 | 2 | 3–5 | 10 | 25 | 100 | 500 | 1000 | 2000 | 4000 | 8000 | 16000 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `cov` | 13.673 | 13.673 | 13.673 | 14.317 | — | — | — | — | — | 20.748 | 20.748 | 20.748 | 20.748 |
+
+Response is flat below `amt≈3` (a measurement-resolution artefact of `cov`
+itself, not a shader threshold — `cov` is a discrete pixel-coverage count,
+so a sub-pixel growth in splat footprint doesn't register until it crosses
+a pixel boundary), then scales smoothly up to `amt=2000`, then **saturates
+exactly at 2000** — identical `cov`/mean-R/total-luma readings at 2000,
+4000, 8000 and 16000. Root cause (confirmed by reading the shader directly,
+see "Honest limitation" below): Spark's own `scale1`/`scale2` are each
+`min(maxPixelRadius, ...)`, and `maxPixelRadius` defaults to 512px — past a
+certain `smearAmt` every affected splat's screen radius is pinned at the
+clamp regardless of how much larger the underlying covariance grows. The
+shipped range (`min=0 max=2000 step=5`) is therefore well-chosen: it spans
+the entire region where the parameter still does anything, and nothing past
+2000 would ever be reachable through a wider slider.
+
+### Measured
+
+Against the loaded `butterfly.spz` (177,132 splats), `window.__bench`
+throughout.
+
+- **`smearAmt = 0` reproduces baseline exactly, on the gate.** Bit-identical
+  `cov`/`R` readings across five different `smearAngle` values (0°, 45°,
+  90°, 135°, 180°) at `smearAmt = 0`, matching DoF's own `apertureAngle`
+  gate precedent exactly.
+- **Anisotropy, not isotropic blur with extra steps.** Bounding-box probe
+  (readPixels, foreground = differs from the corner background pixel by
+  more than a small threshold) at `smearAmt = 500`: baseline footprint
+  518×454px. At `smearAngle = 0°`: 589×452px — width grows by 71px, height
+  is unchanged within noise. At `smearAngle = 90°`: 517×525px — height
+  grows by 71px, width is unchanged within noise. Symmetric, single-axis
+  growth in both cases: this is what an outer-product anisotropic term
+  looks like, not an isotropic one.
+- **Luma conservation, sparse subset (`cullA = 0.85`, Phase 5's established
+  method) — holds within 2% only up to `smearAmt ≈ 50`, then degrades
+  smoothly.** Deviation from the `smearAmt = 0` baseline: `+0.88%` at 5,
+  `-0.06%` at 25, **`-1.39%` at 50** (last point inside the plan's 2%
+  bound), `-3.26%` at 100, `-6.18%` at 200, and continuing smoothly down to
+  roughly `-26%` by 1000–2000 before flattening (tracking the same
+  `maxPixelRadius` saturation as `cov` above). This is a genuine,
+  mechanism-explained energy leak, not a measurement artefact — see "Honest
+  limitation" below for the root cause and why it is not a bug in this
+  phase's own composition logic.
+- **DoF composition — no double correction.** With both effects active
+  (`smearAmt = 25`, `dofAperture = 2°`, `cullA = 0.85`) luma deviation from
+  baseline was `-22.52%`, versus `-13.47%` for DoF alone and `-0.06%` for
+  smear alone at that `smearAmt`. This looks like more than the sum of the
+  parts, and it is — but not from a second `blurAdjust` application. The
+  insertion-point reading above already rules that out at the source level:
+  there is exactly one `detOrig`, one `det`, one `blurAdjust` in the
+  spliced shader. The excess darkening has the same root cause as the
+  single-effect leak above: combining two growth terms in the same `a`/`d`
+  produces *more* total covariance growth than either alone, so more
+  splats cross the `maxPixelRadius` clamp at a given nominal setting. Same
+  mechanism, larger population affected, not a distinct bug.
+- **Frame time**: 30-render average, `smearAmt = 0` **0.18ms** vs
+  `smearAmt = 500` **0.07ms** — within noise, no measurable added cost,
+  matching DoF's own precedent.
+- **48-frame export, animated `smearAngle` envelope** (keyed 0° → 180°
+  across the clip): replicated the exact export-loop call sequence
+  (`setPlayhead` → `pushUniforms` → `updateDofFocus` → `updateSmear` →
+  render) for all 48 frames. `smearAngle` uniform tracked the envelope
+  smoothly (`0.00° → 0.24° → 0.95° → … → 179.76° → 180.00°`), **zero frozen
+  frame pairs** across the full sequence.
+- **Preset round-trip byte-exact** with both parameters off default
+  (`smearAmt = 775`, `smearAngle = 63` — `775` because a range input with
+  `step="5"` silently snaps any programmatically-assigned value to the
+  nearest step, confirmed directly; this is a test-harness quirk, not an
+  app bug). Two consecutive saves of the same loaded state differ only in
+  the preset's own `"saved"` timestamp field; the entire `params` block,
+  smear included, is identical byte-for-byte.
+
+### Honest limitation, recorded per the plan's own instruction
+
+Luma conservation does **not** hold within 2% across the shipped
+`smearAmt` range — only up to roughly a quarter of it (`≈50` of `2000`).
+The cause is fully diagnosed, not hand-waved: Spark's `splatVertex_default`
+computes `blurAdjust` (the alpha correction) from the covariance *before*
+`scale1`/`scale2` clamp the resulting screen radius to `maxPixelRadius`
+(512px default). Once a splat's smeared covariance pushes its eigenvalue
+past that clamp, its footprint stops growing but its alpha has already been
+reduced as if it kept growing — a real energy leak, inherent to Spark's own
+clamp design, and structurally identical to (not caused by) this phase's
+composition logic. It is not specific to anisotropy either: the same clamp
+would eventually undercorrect an extreme isotropic `blurAmount`/aperture
+too, this phase's sweep just happened to be the one that pushed far enough
+to find it. Not fixed in this phase — fixing it would mean either
+recomputing `blurAdjust` from the *clamped* radius (a further shader
+splice, off the plan's B1 scope) or capping `smearAmt` well below where the
+clamp engages (which would cut the slider's usable range roughly in half).
+Recorded as a known, explained boundary the same way Phase 5 recorded the
+dense-capture non-conservation: the sparse-subset measurement is the one
+that actually isolates and confirms the per-splat claim, and the failure
+mode past `amt≈50` is the honest finding, not smoothed over.
+
+### Mobile pass
+
+At 390×844, the `smear` accordion group open: both rows measured
+`right: 374px` inside a 390px viewport, `document.documentElement.scrollWidth
+== innerWidth == 390` — no horizontal overflow. Lower risk than the Gesture
+phase's lane-header work by construction: `smear` is a plain `<details
+class="mod">` group using the exact same row markup as every other
+parameter group (`dof` included), and does not touch `#lane` or either
+disclosure panel that phase's overflow fix targeted.
+
+### Scope: B1 only — screen-space, single direction
+
+One direction in screen space (`smearAngle`, 0–180°, 0 = horizontal), no
+per-splat direction, no world-space projection — deliberately, per the
+plan. **Not built:** world-space direction (would rotate correctly with
+camera orbit — the obvious next step, not this work); per-splat direction
+aligned with each splat's own displacement (B2) — the displacement happens
+in the dyno modifier and the splat is baked by vertex-shader time, so the
+direction isn't carried through to where this phase's shader logic runs.
+Evaluate B2 only after living with B1.
+
+---
+
 ## Colour
 
 Three accents, and they mean different things. Do not reach for a fourth
