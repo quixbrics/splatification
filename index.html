@@ -21,7 +21,18 @@
     --edit:#b48ce8;
     --rail:340px;
     --dock:64px;
-    --lane:88px;
+    /* --lane-extra is JS-driven (updateLaneHeight()) — grows to fit whichever
+       disclosure panels (Audio shaping, Gesture range) are currently open,
+       rather than letting their content overflow the lane's own fixed box
+       into the opaque #transport bar below it. Real bug, found live: with
+       --lane-extra fixed at 0 (i.e. before this existed), the Audio shaping
+       panel's Attack/Release rows measured inside #transport's own screen
+       rect — present in the DOM, receiving no usable clicks, invisible under
+       #transport's opaque background. Confirmed pre-existing, not something
+       any one phase introduced — the lane's height was simply always static
+       while its content was not. */
+    --lane-extra:0px;
+    --lane:calc(88px + var(--lane-extra));
     --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   }
   *{box-sizing:border-box}
@@ -303,7 +314,7 @@
     position:fixed; right:12px; top:12px; z-index:20;
   }
   @media (max-width: 900px), (pointer: coarse) {
-    :root{ --rail:0px; --dock:56px; --lane:96px; }
+    :root{ --rail:0px; --dock:56px; --lane:calc(96px + var(--lane-extra)); }
     #panelToggle{ display:block }
     #rail{
       top:auto; left:0; right:0; width:100%;
@@ -2230,6 +2241,31 @@ function laneFit() {
   drawLane();
 }
 
+/* Grows #lane's own box (via --lane-extra, see :root) to fit whichever
+   disclosure panels are currently open, rather than letting their content
+   overflow into #transport below. Sum, not max — Audio shaping and Gesture
+   range can both be open at once for the same focused parameter. Measured
+   AFTER the caller has already toggled the relevant `.hide` class(es), so a
+   panel's own intrinsic height (unclipped — #lane is overflow:visible) is
+   whatever it naturally is right now, open or not.
+
+   #stage's CSS height already reacts to --lane via calc() with no JS of its
+   own needed, but the THREE renderer's canvas does not auto-follow a CSS
+   resize — resize() has to be called explicitly, same as it is on a real
+   window resize. laneFit() re-fits the lane's OWN canvas (a completely
+   different concern: backing-store pixel density, not layout box size) for
+   the same reason it was already called here before this existed. */
+function updateLaneHeight() {
+  let extra = 0;
+  for (const id of ["gestRangePanel", "audShapePanel"]) {
+    const el = $(id);
+    if (!el.classList.contains("hide")) extra += el.getBoundingClientRect().height;
+  }
+  document.documentElement.style.setProperty("--lane-extra", extra + "px");
+  resize();
+  laneFit();
+}
+
 function laneGeom() {
   const el = focused ? $("p-" + focused) : null;
   const lo = el ? parseFloat(el.min) : 0;
@@ -3868,6 +3904,7 @@ function refreshGestureUI() {
   }
 
   paintReadoutChips();
+  updateLaneHeight();   // catches gestRangePanel's own possible force-hide above, AND laneHead()'s audShapePanel one — this always runs after both
 }
 
 /* Viewport readout chips — pinned, visible whenever Adjust is on (not just
@@ -3898,6 +3935,7 @@ $("gestY").onclick = () => { if (!focused) return; GEST.y?.id === focused ? unbi
 $("gestRangeToggle").onclick = () => {
   $("gestRangePanel").classList.toggle("hide");
   $("gestRangeToggle").textContent = $("gestRangePanel").classList.contains("hide") ? "Range ▾" : "Range ▴";
+  updateLaneHeight();
 };
 for (const [id, key] of [["gestLo", "lo"], ["gestHi", "hi"]]) {
   $(id).oninput = () => {
@@ -3987,7 +4025,8 @@ $("audShapeToggle").onclick = () => {
   const panel = $("audShapePanel");
   panel.classList.toggle("hide");
   refreshShapeToggle();
-  if (!panel.classList.contains("hide")) { laneFit(); drawSparkline(); }
+  updateLaneHeight();
+  if (!panel.classList.contains("hide")) drawSparkline();
 };
 
 /* One listener per shaping slider. Each just writes the field and lets the

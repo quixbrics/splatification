@@ -2472,6 +2472,70 @@ and the region slots — bindings either follow the selected mesh or stay
 global. Noted here so that work has a list of "things holding parameter
 ids" rather than discovering them one at a time.
 
+### A real bug, pre-existing, surfaced by this phase's own panel: `#lane`'s box never grew to fit its own disclosure panels
+
+User-reported: Audio shaping's Attack/Release sliders were "hidden from
+view and so uneditable." Traced to `#lane` (`position:fixed; height:
+var(--lane)`, a **static** 88px/96px) never having grown to fit
+`#audShapePanel` when open — that panel's own natural height (`~195px`,
+canvas + two rows of three sliders) has always overflowed the lane's fixed
+box straight into `#transport` below it, which is opaque and later in the
+DOM, so it paints over whatever of the panel's content lands in its
+screen rectangle. `overflow: visible` on `#lane` meant nothing was
+*clipped* — the sliders were fully present in the DOM, laid out, just
+invisible under `#transport`'s background and (since `#transport` occupies
+that screen position) not receiving real clicks either.
+
+**Confirmed pre-existing, not introduced by Part 1 above:** checked out the
+immediately-prior commit (`efdbae8`, before any gesture-rework changes) and
+reproduced the identical geometry — `attackRect.top: 950.9` against
+`laneRect.bottom: 936`, byte-for-byte the same numbers as the current
+build. It surfaced now because Part 1 added a second disclosure panel
+(`#gestRangePanel`) with the exact same latent defect, which is what
+prompted actually re-checking this area rather than trusting the DOM
+existed and moving on.
+
+**Fix**: `--lane` is now `calc(<base> + var(--lane-extra))` (both the
+desktop 88px and mobile 96px definitions), where `--lane-extra` is a
+JS-driven custom property, not a static one. `updateLaneHeight()` sums the
+measured `getBoundingClientRect().height` of every disclosure panel
+currently **not** `.hide` (Audio shaping, Gesture range — both can be open
+at once for the same row, hence sum, not max) and writes that total to
+`--lane-extra`. Measuring an unhidden panel's own height works correctly
+even though its *parent* box is still constrained, because `flex:0 0 auto`
+children size from their own content regardless of a flex container's
+overflow, and `#lane` is `overflow: visible` — so nothing about the old
+overflow bug prevented measuring the true, correct height to fix it with.
+
+Called from both panels' own toggle handlers, and — once, covering every
+other path that can hide a panel (focus moving to a non-audio-routable
+parameter, an axis losing its binding while its range panel is open) —
+from the end of `refreshGestureUI()`, which every `laneHead()` call already
+reaches. `#stage`'s own CSS size already reacts to `--lane` via `calc()`
+with no JS needed, but the WebGL canvas itself does not auto-follow a CSS
+resize, so `updateLaneHeight()` also calls the existing `resize()` (same
+one bound to the window's own `resize` event) and `laneFit()` (the lane
+timeline canvas's own backing-store fit, a distinct concern — pixel
+density, not layout box size — already called here before this existed).
+
+**Measured**, against the loaded `butterfly.spz`, before and after:
+
+| | before | after |
+|---|---|---|
+| `#lane` height with Audio shaping open | 88px (static) | 282.8px |
+| Audio shaping Attack row inside `#lane` bounds | **false** | **true** |
+| `document.elementFromPoint()` at the Attack slider's centre | (not checked before the fix existed) | resolves to `#audAttack` itself |
+| `--lane-extra` with the panel closed | n/a | exactly `0px` |
+| `--lane-extra`, Gesture range panel alone | n/a | `135.8px` |
+| `--lane-extra`, both panels open together | n/a | `330.7px` (sum of the two above, not the max) |
+| `camera.aspect` before/after opening a panel | — | changes (`2.06 -> 1.26` in one measured case) — confirms `resize()` is actually reached, not just the CSS box |
+| Mobile (390px), same test | — | Attack row inside bounds, zero page-level horizontal overflow |
+
+Console clean across the full sequence (checked specifically against this
+session's own messages, not the tab's full history, which — see the
+Phase 2d/synthetic-`PointerEvent` note above — accumulates old, already-
+documented noise across navigations in a long-lived tab).
+
 ---
 
 ## Colour
