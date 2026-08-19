@@ -2306,12 +2306,11 @@ On a phone the rail covers the subject, so adjusting a slider means not seeing
 what it does. `Adjust` binds up to two parameters to the drag axes and edits
 them on the viewport itself. It works on desktop too — a mouse drag is a drag.
 
-Chips cycle **unbound → X → Y → unbound** on single taps; binding an axis that
-is already held displaces the previous holder rather than refusing. A full drag
-across the stage sweeps the parameter's full range, and drags are relative to
-where the pointer went down, so repeated strokes keep nudging.
+A full drag across the stage sweeps the bound parameter's own range (or
+sub-range — see below), and drags are relative to where the pointer went
+down, so repeated strokes keep nudging.
 
-Two decisions worth keeping:
+Two decisions worth keeping, unchanged by the rework below:
 
 - **It writes through the slider's own `input` event**, never to `P` directly.
   That is the single path already handling auto-key on armed envelopes, dirty
@@ -2323,6 +2322,155 @@ Two decisions worth keeping:
   gesture silently edits a parameter instead of moving the camera. An explicit
   mode is duller and much harder to get wrong. `controls.enabled` is the
   interlock, so the two can never both be live.
+
+### `DEV_PLAN_GESTURE.md` — assignment moved off a `SPEC`-enumerating strip
+
+The original mechanism was a chip per `ANIM` id (cycling **unbound → X → Y →
+unbound** on tap), built when `SPEC` had 18 entries. By the time Region,
+Saturation and Orbit landed it enumerated ~75 chips for ~60 animatable
+parameters — a bad picker, even though it had always been a reasonable
+*switcher*. Replaced with per-parameter assignment in the lane header
+(`#gestX`/`#gestY`, contextual to the focused parameter — the same place
+Audio routing and Mask already live), plus a `Range ▾` disclosure for
+sub-range and invert.
+
+**Verify-before-design step, confirmed real, not assumed:** the strip
+enumerated `ANIM`, which includes all 40 region `SPEC` entries (4 slots x 10
+fields) regardless of which `.rgpanel` tab was actually visible. Measured
+directly before touching any code: 75 total chips, 40 of them region chips,
+30 of those 40 belonging to slots other than the currently-visible one
+(`visibleSlot: "0"`, `hiddenSlotChipCount: 30`). Clicking a hidden-slot chip
+(`rg2X`) bound it successfully — `chip bx` applied — while its own panel
+measured `panelVisible: false`. So the strip really did let you bind and drag
+a parameter you could not see, confirming the plan's own suspicion rather
+than just reorganising around an assumed problem.
+
+### Design
+
+`GEST[ax]` is `null` or `{id, lo, hi, invert}` — `lo`/`hi` are fractions 0..1
+of the parameter's own slider travel (default 0/1, so an unranged bind
+behaves exactly as the old full-range-only mechanism always did), `invert`
+reverses drag direction. Plain JS routing state, not `SPEC` — same treatment
+as `AUD`'s band/depth and region `shape`/`mode`/`invert`.
+
+- **`#gestX`/`#gestY`** toggle whether the *focused* parameter holds that
+  axis. Binding an axis already held by another parameter displaces the
+  previous holder (unchanged rule); claiming one axis clears the same
+  parameter from the other first, so a parameter can never hold both at
+  once — verified: binding `sat` to Y while it already held X moved it
+  (`{x:null, y:{sat,...}}`), it did not duplicate.
+- **`#gestRangePanel`** (`Range ▾`, same disclosure convention as Audio
+  shaping) edits `lo`/`hi`/`invert` for whichever axis the focused parameter
+  currently holds; disabled when it holds neither.
+- **Row indicator.** A `<span class="gaxis">` lives inside every animatable
+  row's own `<label>` (created once per row at boot, alongside the existing
+  `◆`/`↺`), textContent set to `"X"`/`"Y"`/`""` — **not** a new grid column
+  or a per-row button, exactly per the plan's own instruction: the row grid
+  already carries five things across ~57 rows, and a control most rows would
+  never use does not belong there. `refreshGestureUI()` tracks which row
+  last carried each axis (`lastAxisRow`) so a rebind only ever touches the
+  0-2 rows that actually changed, not all 57.
+- **Viewport readout** repurposes the old drag-only text HUD (`#gestureHud`)
+  into persistent, tappable chips — visible whenever Adjust is on, not just
+  mid-drag, so you can see what's bound without opening the sheet. Tapping a
+  chip unbinds that axis and does nothing else. `pointer-events:none` on the
+  container, the chips themselves the only hit targets — moot in practice
+  since Adjust and Orbit are already mutually exclusive (the chips are
+  `display:none` whenever Orbit could be dragging), but kept as the belt per
+  the plan.
+
+### A real TDZ bug caught before it ever loaded, not by testing
+
+`refreshGestureUI()` (which reads `GEST`) is called from `laneHead()`, and
+`laneHead()` is called once at **boot** (`laneHead();`, well before the
+gesture module's own code runs) — the *exact* shape of bug this file's own
+"State — declared BEFORE anything that reads it" block at the top exists to
+prevent (see Fixed, "TDZ on `playhead`"). `GEST` was originally declared as a
+`const` down in the gesture module, ~1900 lines after that boot call; had it
+shipped as written, the very first `laneHead()` call would have thrown a TDZ
+`ReferenceError` and silently killed every listener and the render loop
+below it — the original bug, verbatim, in new state. Caught by re-reading
+this file's own conventions before testing, not discovered by a crash:
+`GEST`/`gestureOn`/`gdrag`/`lastAxisRow` moved up to the top-of-file state
+block with everything else that has to exist before first use.
+
+### Measured
+
+Against the loaded `butterfly.spz`, real `PointerEvent`s dispatched at
+stage coordinates (a fresh tab — see the Phase 2d environment note above for
+why that matters for synthetic dispatch reliability) unless noted:
+
+- **Full-range drag**: `dAmt` bound to X (range 0..0.5), drag from the
+  stage's left edge to its right edge — `V.dAmt` measured **exactly 0** at
+  the start and **exactly 0.5** at the end, endpoint to endpoint. (A first
+  attempt starting/ending 5px inside each edge measured 0.495 at the far
+  end — not a bug, `frac` genuinely does not reach 1.0 unless the drag
+  starts and ends exactly at the stage bounds; corrected and re-measured.)
+- **Exclusivity**: binding `sat` to X displaced `dAmt` (X held `sat`, not
+  `dAmt`, immediately); binding the same `sat` to Y *moved* it rather than
+  duplicating — `{x:null, y:{sat}}`, never `{x:{sat}, y:{sat}}`.
+- **Auto-key regression — the acceptance line called out as "existing
+  verified behaviour and the thing most likely to break."** `dAmt` armed
+  with 2 pre-existing keys, bound to X, playhead at `t=0.3`: a gesture drag
+  added a **third** key at exactly `t=0.3` (`keysBefore: 2, keysAfter: 3`,
+  matching the dragged value) — dragging a bound, armed parameter still
+  writes a keyframe, identically to dragging its slider.
+- **Sub-range**: `cullA` bound to X with `lo=0.4, hi=0.6` (range 0..1) — a
+  full-stage drag measured **exactly 0.4** at the start edge and **exactly
+  0.6** at the end edge.
+- **Invert, verified pointwise, not just at the endpoints.** Same drag
+  (0→full stage) from a mid-range start (`0.5`): normal binding sampled
+  `[0.75, 1, 1, 1]` at 25/50/75/100% of the drag; inverted sampled
+  `[0.25, 0, 0, 0]` — mirrored around the 0.5 start point at every sample,
+  not just at the ends. (A first attempt started the tracked value already
+  at an extreme, 0 or 1, and measured a flat `[0,0,0,0]`/`[1,1,1,1]` in both
+  directions — not a bug, just a clamp against a boundary hiding the effect;
+  starting mid-range is what actually exercises inversion.)
+- **Hidden-slot closure — confirmed, not just no-longer-possible-to-notice.**
+  `element.click()` on a hidden-slot label *does* still fire its listener
+  (a JS-level method call bypasses hit-testing entirely, so this is not a
+  real test of reachability) — the correct instrument is the element's own
+  geometry: `getBoundingClientRect()` on a hidden-slot label measures
+  `{x:0, y:0, w:0, h:0}`, `offsetParent: null`, `tabIndex: -1`. There is no
+  screen coordinate a real pointer event could target, and it is excluded
+  from keyboard tab order too — no input path, mouse, touch or keyboard,
+  can focus it, which is the actual guarantee the acceptance line asks for.
+- **390px worst case** (a maskable parameter, armed envelope, audio route,
+  and the gesture controls all present on one focused row): lane header
+  measured `scrollWidth 892` vs `clientWidth 386` — needs a scroll, and
+  `#gestX` measured reachable via `scrollIntoView` within the header's
+  bounds, with zero page-level horizontal overflow.
+- **Preset round-trip**, both axes bound with distinct sub-ranges and one
+  inverted (`x:{dAmt,lo:0.15,hi:0.85,invert:true}`,
+  `y:{sat,lo:0.2,hi:0.9,invert:false}`) — saved, wiped, reloaded: restored
+  object-equal to the saved state, both axes, all four fields each.
+- **No `SPEC`-enumerating element remains**: `document.querySelectorAll
+  ('.chip').length === 0`, `#palette` absent from the DOM entirely.
+- Console clean across the full sequence apart from one expected,
+  environment-specific noise source — see below.
+
+### Environment note: synthetic `PointerEvent`s and `setPointerCapture`
+
+`renderer.domElement.setPointerCapture(e.pointerId)` (pre-existing code,
+unchanged by this phase) throws `NotFoundError` when the triggering
+`pointerdown` was a synthetic `dispatchEvent` rather than a real hardware
+event — there is no genuinely "active" pointer session for a fabricated
+`pointerId` to capture. Confirmed harmless to every measurement above: the
+throw happens on the *last* line of the handler, after `gdrag` (the state
+every subsequent drag calculation reads) is already assigned, and every
+numeric result quoted above came out exactly as predicted despite the
+exception firing. A real user's pointer events always have a valid active
+session; this is purely a synthetic-testing artifact, the same family as
+the tab-degradation and stale-readback notes elsewhere in this file, not a
+regression to chase.
+
+### Interaction with multi-instance (roadmap item 8)
+
+Per the plan: not pre-solved. `GEST` holds parameter ids, so when multiple
+`SplatMesh` instances land, it will need the same scoping decision as `AUD`
+and the region slots — bindings either follow the selected mesh or stay
+global. Noted here so that work has a list of "things holding parameter
+ids" rather than discovering them one at a time.
 
 ---
 

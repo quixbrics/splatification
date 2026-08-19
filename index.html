@@ -88,6 +88,13 @@
   }
   #audShapePanel.hide{display:none}
   #audShapeToggle.dirty{color:var(--edit); border-color:var(--edit)}
+  /* Sub-range/invert — same disclosure treatment as audio shaping: the two
+     axis toggles are what anyone touches, the range is refinement. */
+  #gestRangePanel{
+    flex:0 0 auto; border-bottom:1px solid var(--rule); background:var(--chassis);
+    padding:8px 16px;
+  }
+  #gestRangePanel.hide{display:none}
   #audSpark{width:100%; height:34px; display:block; margin-bottom:6px}
   #audShapeRows{display:grid; grid-template-columns:1fr 1fr; gap:0 16px}
   #audShapeRows .row{margin-bottom:5px}
@@ -133,49 +140,44 @@
   .key:focus-visible{outline:1px solid var(--signal); outline-offset:1px}
   .key.ghost{visibility:hidden; cursor:default}
 
-  /* Tool palette + gesture mode ---------------------------------------- */
+  /* Gesture mode — direct manipulation ---------------------------------
+     Assignment lives in the lane header (#gestX/#gestY/#gestRangeToggle,
+     contextual to the focused parameter — see laneHead()), not a
+     SPEC-enumerating chip strip. See DEV_PLAN_GESTURE.md / NOTES "Gesture
+     mode": at 55-60 SPEC parameters the old strip had become the problem
+     it existed to solve, and it also silently exposed chips for whichever
+     region slot's parameters were NOT the currently-visible tab. */
   #gestureToggle{
     position:fixed; z-index:20; left:12px;
     bottom:calc(var(--dock) + var(--lane) + 10px);
   }
-  #palette{
-    position:fixed; z-index:19; left:0; right:var(--rail);
-    bottom:calc(var(--dock) + var(--lane) + 46px);
-    padding:7px 12px 9px;
-    background:color-mix(in srgb, var(--chassis) 88%, transparent);
-    border-top:1px solid var(--rule); border-bottom:1px solid var(--rule);
+  /* Viewport readout — pinned, visible whenever Adjust is on, showing the
+     bound parameter(s) and live value so you can see what you're dragging
+     without opening the sheet. pointer-events:none on the container so it
+     never eats an orbit/adjust drag; the chips themselves opt back in, the
+     only hit targets, so a tap can unbind without needing a separate
+     "unbind" affordance. */
+  #gestureHud{
+    position:fixed; z-index:21; left:12px; pointer-events:none;
+    bottom:calc(var(--dock) + var(--lane) + 10px + 34px);
+    display:flex; flex-direction:column; gap:4px; align-items:flex-start;
   }
-  #palette.hide{display:none}
-  #paletteAxes{display:flex; align-items:center; gap:14px; margin-bottom:7px}
-  #paletteAxes .ax{color:var(--ink-dim); letter-spacing:.05em}
-  #paletteAxes .ax b{
-    display:inline-block; width:15px; font-weight:400; color:var(--edit);
+  #gestureHud.hide{display:none}
+  .gchip{
+    pointer-events:auto; cursor:pointer;
+    color:var(--signal); font-variant-numeric:tabular-nums; letter-spacing:.02em;
+    background:var(--chassis); border:1px solid var(--edit); padding:6px 10px;
   }
-  #paletteAxes .ax span{color:var(--signal)}
-  #paletteAxes .sp{flex:1}
-  #paletteChips{
-    display:flex; gap:6px; overflow-x:auto; padding-bottom:2px;
-    scrollbar-width:none;
-  }
-  #paletteChips::-webkit-scrollbar{display:none}
-  .chip{
-    flex:0 0 auto; padding:4px 9px; cursor:pointer;
-    background:var(--chassis-hi); border:1px solid var(--rule); color:var(--ink-dim);
-    font:inherit; letter-spacing:.04em; white-space:nowrap;
-  }
-  .chip:hover{border-color:var(--ink-dim); color:var(--ink)}
-  .chip.bx, .chip.by{color:var(--edit); border-color:var(--edit)}
-  .chip b{font-weight:400; color:var(--edit); margin-right:5px}
+  .gchip:hover{border-color:var(--signal)}
+  /* Row axis-letter indicator — passive text inside the existing label
+     cell, not a new grid column or a per-row button (the row grid already
+     carries label/output/reset/key/slider for ~57 rows; a control most
+     rows would never use does not belong there). At most 2 rows ever show
+     one at a time. */
+  .gaxis{color:var(--edit); font-weight:600; margin-left:5px}
   /* While dragging, the viewport must not pan/zoom the page under the finger. */
   body.gesture #stage, body.gesture #stage canvas{touch-action:none}
   body.gesture #stage{outline:1px solid var(--edit); outline-offset:-2px}
-  #gestureHud{
-    position:fixed; z-index:21; left:12px; pointer-events:none;
-    bottom:calc(var(--dock) + var(--lane) + 46px);
-    color:var(--signal); font-variant-numeric:tabular-nums;
-    background:var(--chassis); border:1px solid var(--edit); padding:6px 10px;
-  }
-  #gestureHud.hide{display:none}
 
   #osd{
     position:fixed; left:16px; top:14px; pointer-events:none;
@@ -364,20 +366,15 @@
   <!-- Mobile only: the rail is a bottom sheet there, this opens it. -->
   <button id="panelToggle" aria-expanded="false">Controls</button>
 
-  <!-- Direct manipulation. Bind parameters to the drag axes and adjust them
-       on the viewport itself, so the splat stays visible while you work —
-       the whole point on a phone, where the rail covers the subject. -->
+  <!-- Direct manipulation. Bind parameters to the drag axes (via the lane
+       header's Gesture X/Y toggles, once a parameter is focused) and adjust
+       them on the viewport itself, so the splat stays visible while you
+       work — the whole point on a phone, where the rail covers the subject.
+       See DEV_PLAN_GESTURE.md / NOTES "Gesture mode" — this used to be a
+       SPEC-enumerating chip strip here; it is gone, replaced by the lane
+       header (assignment) and #gestureHud below (live readout). -->
   <button id="gestureToggle" aria-pressed="false" title="Adjust parameters by dragging on the viewport">Adjust</button>
-  <div id="gestureHud" class="hide"></div>
-  <div id="palette" class="hide" aria-hidden="true">
-    <div id="paletteAxes">
-      <span class="ax"><b>X</b><span id="axX">unbound</span></span>
-      <span class="ax"><b>Y</b><span id="axY">unbound</span></span>
-      <span class="sp"></span>
-      <button id="paletteClear">Unbind</button>
-    </div>
-    <div id="paletteChips"></div>
-  </div>
+  <div id="gestureHud" class="hide" aria-hidden="true" title="Tap a chip to unbind that axis"></div>
   <div id="drop">
     <h1>Splat Bench</h1>
     <p>Drop a <strong>.ply</strong> / .spz / .splat / .sog file here — or tap <em>Choose file</em> —
@@ -419,6 +416,18 @@
       <option value="4">R4</option>
     </select>
     <label class="check"><input type="checkbox" id="maskInv" title="Invert the mask for this parameter only"> Inv</label>
+    <span class="lsep"></span>
+    <label class="audlbl">Gesture</label>
+    <button id="gestX" type="button" disabled title="Bind this parameter to the X drag axis (Adjust mode)">X</button>
+    <button id="gestY" type="button" disabled title="Bind this parameter to the Y drag axis (Adjust mode)">Y</button>
+    <button id="gestRangeToggle" type="button" disabled title="Sub-range and invert for whichever axis this parameter holds">Range ▾</button>
+  </div>
+  <div id="gestRangePanel" class="hide">
+    <div class="row"><label>Low</label><output id="o-gestLo">—</output>
+      <input type="range" id="gestLo" min="0" max="1" step="0.01" value="0"></div>
+    <div class="row"><label>High</label><output id="o-gestHi">—</output>
+      <input type="range" id="gestHi" min="0" max="1" step="0.01" value="1"></div>
+    <label class="check"><input type="checkbox" id="gestInvert"> Invert</label>
   </div>
   <div id="audShapePanel" class="hide">
     <canvas id="audSpark"></canvas>
@@ -846,6 +855,17 @@ let playing = false;
 let rendering = false;
 const bounds = { min: -1, max: 1 };   // object-space Y extent
 const P = {};                         // parameter values, keyed by slider id
+
+/* Gesture mode (DEV_PLAN_GESTURE.md) — GEST[ax] is null or {id,lo,hi,invert}.
+   Declared here, not down with the rest of the gesture module: laneHead()
+   is called at boot (long before that module's own code runs) and now
+   calls refreshGestureUI(), which reads GEST — the exact TDZ shape the
+   comment above warns about. Caught before it shipped by re-reading this
+   file's own history, not discovered by testing. */
+let gestureOn = false;
+let gdrag = null;
+const GEST = { x: null, y: null };
+const lastAxisRow = { x: null, y: null };
 
 /* Region slots — see the big comment block near buildRegionRows() below for
    the full design. Shape/mode/invert are per-slot ROUTING choices, like AUD's
@@ -1955,6 +1975,13 @@ for (const [id, digits] of SPEC) {
     lbl.classList.add("focusable");
     lbl.title = `Focus ${id} in the lane`;
     lbl.addEventListener("click", () => focusParam(id));
+    // Gesture axis indicator (DEV_PLAN_GESTURE.md) — passive text inside the
+    // existing label cell, set/cleared only for the 0-2 rows actually bound
+    // at any time; see refreshGestureUI(). Not a new grid column.
+    const gax = document.createElement("span");
+    gax.className = "gaxis";
+    gax.id = "gaxis-" + id;
+    lbl.appendChild(gax);
   }
   markDirty(id);
 }
@@ -2144,7 +2171,7 @@ function setPlayhead(t) {
 
 function laneHead() {
   const n = $("laneName"), r = $("laneRange");
-  if (!focused) { n.textContent = "no parameter focused"; r.textContent = ""; return; }
+  if (!focused) { n.textContent = "no parameter focused"; r.textContent = ""; refreshGestureUI(); return; }
   const el = $("p-" + focused), e = envOf(focused);
   n.textContent = focused;
   r.textContent = `${el.min} … ${el.max}    ${e.keys.length} key${e.keys.length === 1 ? "" : "s"}`;
@@ -2180,6 +2207,8 @@ function laneHead() {
   $("maskInv").disabled = !mk;
   $("maskSrc").value = mk ? String(MASK[mk].src) : "0";
   $("maskInv").checked = mk ? MASK[mk].invert : false;
+
+  refreshGestureUI();
 }
 
 function audMeters() {
@@ -3468,6 +3497,14 @@ function serialize() {
         .filter(([, m]) => m.src)
         .map(([k, m]) => [k, { src: m.src, invert: m.invert }]),
     ),
+    /* DEV_PLAN_GESTURE.md — additive, no version bump, absent means unbound
+       (same "absent means default" rule as everywhere else here). Only
+       written when actually bound, same filtering as audio routes below. */
+    gesture: Object.fromEntries(
+      ["x", "y"]
+        .filter((ax) => GEST[ax])
+        .map((ax) => [ax, { id: GEST[ax].id, lo: GEST[ax].lo, hi: GEST[ax].hi, invert: GEST[ax].invert }]),
+    ),
     /* Routing only. The audio file itself is referenced by name and never
        embedded, exactly as the splat is — reload the track, keep the routing. */
     audio: {
@@ -3585,6 +3622,24 @@ function applyPreset(o) {
     if (!MASKABLE.includes(k)) continue;
     const n = Number(src?.src);
     if (Number.isInteger(n) && n >= 0 && n <= 4) MASK[k] = { src: n, invert: !!src.invert };
+  }
+
+  /* Gesture (DEV_PLAN_GESTURE.md). Wipe first, same replace-not-merge rule
+     as envelopes/regions. Same NaN-coalescing care the audio-routes restore
+     needed: Number(v) ?? def does not fall through on NaN, only on
+     null/undefined — see NOTES "Audio shaping". */
+  GEST.x = GEST.y = null;
+  {
+    const num = (v, def) => (Number.isFinite(v) ? v : def);
+    for (const ax of ["x", "y"]) {
+      const src = o.gesture?.[ax];
+      if (!src || typeof src.id !== "string" || !ANIM.includes(src.id)) continue;
+      const lo = clamp(num(Number(src.lo), 0), 0, 1);
+      const hi = clamp(num(Number(src.hi), 1), 0, 1);
+      GEST[ax] = { id: src.id, lo: Math.min(lo, hi), hi: Math.max(lo, hi), invert: !!src.invert };
+    }
+    // a parameter can never hold both axes at once — last-applied (y) wins, matching bindAxis()'s own rule
+    if (GEST.x && GEST.y && GEST.x.id === GEST.y.id) GEST.x = null;
   }
 
   /* --- v3 -> v4 migration: Reveal folded into a region slot -------------
@@ -3752,46 +3807,112 @@ function applyPreset(o) {
  * mis-detected gesture silently edits a parameter instead of moving the
  * camera. An explicit mode is duller and much harder to get wrong.
  * ------------------------------------------------------------------ */
-const GEST = { x: null, y: null };
-let gestureOn = false;
-let gdrag = null;
+/* GEST[ax] is null (unbound) or {id, lo, hi, invert} — lo/hi are fractions
+   0..1 of the parameter's OWN slider travel (default 0/1, so a bare bind
+   behaves exactly as a full-range one always has), invert reverses drag
+   direction. Plain JS routing state, not SPEC — same treatment as AUD's
+   band/depth and region shape/mode/invert: it routes, it is not itself a
+   value. See DEV_PLAN_GESTURE.md — this replaced a SPEC-enumerating chip
+   strip that, at 55-60 parameters, had become the thing it was supposed to
+   solve (see NOTES "Gesture mode" for the hidden-slot chip finding that
+   confirmed the strip had to go, not just get reorganised). GEST/gestureOn/
+   gdrag/lastAxisRow themselves are declared up in the top-of-file state
+   block, not here — laneHead() is called at boot, long before this module
+   runs, and now calls refreshGestureUI(), which reads GEST. */
 
 const paramLabel = (id) =>
   $("p-" + id).parentElement.querySelector("label")?.textContent.trim() ?? id;
 
-function paintPalette() {
-  for (const chip of document.querySelectorAll(".chip")) {
-    const id = chip.dataset.id;
-    const isX = GEST.x === id, isY = GEST.y === id;
-    chip.classList.toggle("bx", isX);
-    chip.classList.toggle("by", isY);
-    chip.querySelector("b").textContent = isX ? "X" : isY ? "Y" : "";
+/* Binding an axis already held by another parameter displaces the previous
+   holder rather than refusing (unchanged rule from the old chip strip). A
+   parameter can never be on both axes at once: claiming one clears it from
+   the other first. */
+function bindAxis(ax, id) {
+  const other = ax === "x" ? "y" : "x";
+  if (GEST[other]?.id === id) GEST[other] = null;
+  GEST[ax] = { id, lo: 0, hi: 1, invert: false };
+  refreshGestureUI();
+}
+function unbindAxis(ax) {
+  GEST[ax] = null;
+  refreshGestureUI();
+}
+
+/* Single paint function for every gesture-related UI surface: the lane-
+   header X/Y toggles + range disclosure, the row axis-letter indicators,
+   and the viewport readout chips. Called on focus change, on any bind/
+   unbind, and on every drag move (for the live value in the readout chips). */
+function refreshGestureUI() {
+  // lane-header toggles reflect whether the FOCUSED parameter holds each axis
+  $("gestX").classList.toggle("on", !!focused && GEST.x?.id === focused);
+  $("gestY").classList.toggle("on", !!focused && GEST.y?.id === focused);
+  $("gestX").disabled = $("gestY").disabled = !focused;
+
+  const boundAx = focused && GEST.x?.id === focused ? "x" : focused && GEST.y?.id === focused ? "y" : null;
+  $("gestRangeToggle").disabled = !boundAx;
+  if (!boundAx) $("gestRangePanel").classList.add("hide");
+  if (boundAx) {
+    const g = GEST[boundAx];
+    $("gestLo").value = g.lo; $("o-gestLo").textContent = g.lo.toFixed(2);
+    $("gestHi").value = g.hi; $("o-gestHi").textContent = g.hi.toFixed(2);
+    $("gestInvert").checked = g.invert;
   }
-  $("axX").textContent = GEST.x ? paramLabel(GEST.x) : "unbound";
-  $("axY").textContent = GEST.y ? paramLabel(GEST.y) : "unbound";
+
+  // row axis-letter indicators — only the 0-2 rows that actually changed
+  for (const ax of ["x", "y"]) {
+    const prevId = lastAxisRow[ax];
+    if (prevId) { const el = $("gaxis-" + prevId); if (el) el.textContent = ""; }
+    const id = GEST[ax]?.id ?? null;
+    lastAxisRow[ax] = id;
+    if (id) { const el = $("gaxis-" + id); if (el) el.textContent = ax.toUpperCase(); }
+  }
+
+  paintReadoutChips();
 }
 
-/* One chip, one tap: unbound -> X -> Y -> unbound. Binding an axis that is
-   already taken displaces the previous holder rather than refusing. */
-function cycleChip(id) {
-  if (GEST.x === id)      { GEST.x = null; GEST.y = id; }
-  else if (GEST.y === id) { GEST.y = null; }
-  else                    { GEST.x = id; }
-  if (GEST.x && GEST.x === GEST.y) GEST.y = null;
-  paintPalette();
+/* Viewport readout chips — pinned, visible whenever Adjust is on (not just
+   mid-drag, unlike the old text HUD), showing the bound parameter's name
+   and live V value so you can see what you are dragging without opening
+   the sheet. Tapping a chip clears that axis and nothing else. */
+function paintReadoutChips() {
+  const el = $("gestureHud");
+  if (!gestureOn || (!GEST.x && !GEST.y)) { el.classList.add("hide"); el.replaceChildren(); return; }
+  el.replaceChildren();
+  for (const ax of ["x", "y"]) {
+    const g = GEST[ax];
+    if (!g) continue;
+    const digits = SPEC.find(([sid]) => sid === g.id)?.[1] ?? 2;
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "gchip";
+    chip.textContent = `${ax.toUpperCase()}  ${paramLabel(g.id)}  ${readout(g.id, digits, V[g.id])}`;
+    chip.title = "Tap to unbind";
+    chip.addEventListener("click", () => unbindAxis(ax));
+    el.append(chip);
+  }
+  el.classList.remove("hide");
 }
 
-for (const id of ANIM) {
-  const chip = document.createElement("button");
-  chip.type = "button";
-  chip.className = "chip";
-  chip.dataset.id = id;
-  chip.innerHTML = "<b></b>";
-  chip.append(paramLabel(id));
-  chip.addEventListener("click", () => cycleChip(id));
-  $("paletteChips").append(chip);
+$("gestX").onclick = () => { if (!focused) return; GEST.x?.id === focused ? unbindAxis("x") : bindAxis("x", focused); };
+$("gestY").onclick = () => { if (!focused) return; GEST.y?.id === focused ? unbindAxis("y") : bindAxis("y", focused); };
+$("gestRangeToggle").onclick = () => {
+  $("gestRangePanel").classList.toggle("hide");
+  $("gestRangeToggle").textContent = $("gestRangePanel").classList.contains("hide") ? "Range ▾" : "Range ▴";
+};
+for (const [id, key] of [["gestLo", "lo"], ["gestHi", "hi"]]) {
+  $(id).oninput = () => {
+    const boundAx = focused && GEST.x?.id === focused ? "x" : focused && GEST.y?.id === focused ? "y" : null;
+    if (!boundAx) return;
+    GEST[boundAx][key] = clampNum(parseFloat($(id).value), 0, 1);
+    if (GEST[boundAx].lo > GEST[boundAx].hi) [GEST[boundAx].lo, GEST[boundAx].hi] = [GEST[boundAx].hi, GEST[boundAx].lo];
+    refreshGestureUI();
+  };
 }
-paintPalette();
+$("gestInvert").onchange = () => {
+  const boundAx = focused && GEST.x?.id === focused ? "x" : focused && GEST.y?.id === focused ? "y" : null;
+  if (!boundAx) return;
+  GEST[boundAx].invert = $("gestInvert").checked;
+};
 
 function setGesture(on) {
   if (on && correcting) return;           // Correct owns the viewport; see syncControlsEnabled
@@ -3801,34 +3922,20 @@ function setGesture(on) {
   $("gestureToggle").textContent = on ? "Orbit" : "Adjust";
   $("gestureToggle").classList.toggle("on", on);
   $("gestureToggle").setAttribute("aria-pressed", String(on));
-  $("palette").classList.toggle("hide", !on);
-  $("palette").setAttribute("aria-hidden", String(!on));
-  if (!on) hud(false);
+  paintReadoutChips();
 }
 
 $("gestureToggle").onclick = () => setGesture(!gestureOn);
-$("paletteClear").onclick = () => { GEST.x = GEST.y = null; paintPalette(); };
-
-function hud(show) {
-  const el = $("gestureHud");
-  if (!show || (!GEST.x && !GEST.y)) { el.classList.add("hide"); return; }
-  const line = (ax) => {
-    const id = GEST[ax];
-    if (!id) return "";
-    const digits = SPEC.find(([sid]) => sid === id)?.[1] ?? 2;
-    return `${ax.toUpperCase()}  ${paramLabel(id)}  ${readout(id, digits, V[id])}`;
-  };
-  el.textContent = [line("x"), line("y")].filter(Boolean).join("\n");
-  el.style.whiteSpace = "pre";
-  el.classList.remove("hide");
-}
 
 function applyAxis(ax, frac) {
-  const id = GEST[ax];
-  if (!id || !gdrag) return;
-  const el = $("p-" + id);
-  const lo = parseFloat(el.min), hi = parseFloat(el.max);
-  el.value = clampNum(gdrag.vals[id] + frac * (hi - lo), lo, hi);
+  const g = GEST[ax];
+  if (!g || !gdrag) return;
+  if (g.invert) frac = -frac;
+  const el = $("p-" + g.id);
+  const sliderLo = parseFloat(el.min), sliderHi = parseFloat(el.max);
+  const span = sliderHi - sliderLo;
+  const subLo = sliderLo + g.lo * span, subHi = sliderLo + g.hi * span;
+  el.value = clampNum(gdrag.vals[g.id] + frac * (subHi - subLo), subLo, subHi);
   el.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
@@ -3836,24 +3943,24 @@ renderer.domElement.addEventListener("pointerdown", (e) => {
   if (!gestureOn || (!GEST.x && !GEST.y)) return;
   const vals = {};
   for (const ax of ["x", "y"]) {
-    const id = GEST[ax];
-    if (id) vals[id] = parseFloat($("p-" + id).value);
+    const g = GEST[ax];
+    if (g) vals[g.id] = parseFloat($("p-" + g.id).value);
   }
   gdrag = { px: e.clientX, py: e.clientY, vals,
            w: Math.max(stage.clientWidth, 1), h: Math.max(stage.clientHeight, 1) };
   renderer.domElement.setPointerCapture(e.pointerId);
-  hud(true);
+  paintReadoutChips();
 });
 
 addEventListener("pointermove", (e) => {
   if (!gdrag) return;
   applyAxis("x", (e.clientX - gdrag.px) / gdrag.w);
   applyAxis("y", -(e.clientY - gdrag.py) / gdrag.h);   // up increases, as a fader would
-  hud(true);
+  paintReadoutChips();
 });
 
 for (const ev of ["pointerup", "pointercancel"]) {
-  addEventListener(ev, () => { if (gdrag) { gdrag = null; hud(false); } });
+  addEventListener(ev, () => { if (gdrag) { gdrag = null; paintReadoutChips(); } });
 }
 
 /* ------------------------------------------------------------------ *
@@ -4109,6 +4216,10 @@ if (new URLSearchParams(location.search).has("debug")) {
     get dyno() { return dyno; },          // for verifying stdlib call forms
     get U()    { return U; },
     get gest() { return GEST; },
+    bindAxis,
+    unbindAxis,
+    refreshGestureUI,
+    setGesture,
     get xform(){ return xform; },
     get correcting(){ return correcting; },
     get radius(){ return radius; },
