@@ -1,6 +1,6 @@
-# Splatification — Splat Bench
+# Gausseous
 
-**[Live demo →](https://quixbrics.github.io/splatification/)** (Chrome or Edge for video export)
+**[Live demo →](https://quixbrics.github.io/gausseous/)** (Chrome or Edge for video export)
 
 A bespoke 3D Gaussian Splatting manipulator and animator for the browser.
 Arbitrary per-Gaussian programmable manipulation via Spark's `dyno` shader-graph
@@ -10,6 +10,10 @@ LFOs, OSC).
 Single file, no build step, no npm install. Dependencies are CDN imports via an
 importmap: [three](https://threejs.org) 0.180,
 [Spark](https://sparkjs.dev) 2.1.0, mp4-muxer 5.x.
+
+> Formerly *Splatification / Splat Bench*. Presets written under the old name
+> still load — the old `splat-bench-preset` format tag is accepted alongside the
+> current one.
 
 ## Run
 
@@ -30,26 +34,49 @@ after editing, or serve with no-store headers:
 python3 -c "import http.server; H=http.server.SimpleHTTPRequestHandler; _e=H.end_headers; H.end_headers=lambda s:(s.send_header('Cache-Control','no-store'),_e(s)); http.server.test(HandlerClass=H,port=8000)"
 ```
 
+## Control groups
+
+The rail is one accordion, in pipeline order — what the splat *is*, then what is
+done to it, then how it leaves:
+
+**Camera** · **Transform** · **Opacity** · **Masks** · **Depth** · **Colour** ·
+**Noise** · **Quantise** · **Wave** · **Smear** · **Audio** · **Output** ·
+**Preset** · **Viewport**
+
 ## Effects
 
-All effects are a single `dyno.dynoBlock` running in one GPU pass as an
+Most effects are a single `dyno.dynoBlock` running in one GPU pass as an
 `objectModifier` on the `SplatMesh`:
 
-- **Displace** — `sin()` field over swizzled center × per-splat random direction
-- **Reveal** — soft `smoothstep` sweep plane, shrinking splat scales into the edge
-- **Trim** — per-splat cull by minimum opacity and maximum scale
-- **Tint** — RGB multiply
-- **Region** — Spark's native SDF edit: cut, crop or colorize inside a
-  sphere / box / ellipsoid / cylinder / capsule / plane
+- **Noise** — `sin()` field over swizzled center × per-splat random direction
+- **Opacity** — per-splat cull by minimum opacity and maximum scale
+- **Colour** — brightness, RGB tint, saturation
+- **Masks** — Spark's native SDF edit: cut, crop or colorize inside a
+  sphere / box / ellipsoid / cylinder / capsule / plane, in four slots. Any of
+  Noise / Saturation / Tint / Opacity can be scoped to a slot via its own
+  **Mask** control in the lane.
+- **Quantise**, **Wave** — voxel snap and index-phase sweep
+
+**Depth** and **Smear** are different: they run in Spark's own vertex shader at
+rasterisation time, not in the dyno graph. Depth carries both depth fade (aerial
+perspective, in the dyno pass) and depth of field (per-splat circle-of-confusion
+blur). Smear stretches each splat's projected shape along a screen-space
+direction using the same covariance-plus-energy-correction machinery, so the two
+compose through a single alpha correction.
 
 **Audio** drives any parameter from a track's low / mid / high content. The file is
 analysed offline into per-band envelopes rather than sampled live, so scrubbing,
 playback and export all agree. Click a parameter's name to focus it, then pick a band
 in the lane. Audio layers on top of envelopes rather than replacing them.
 
+**Loop** repeats a track that is shorter than the timeline, in the preview, the
+envelope lookup and the exported audio alike. **Duration × N** sets the timeline
+to exactly N track lengths, so a loop never lands mid-bar.
+
 **Adjust** binds up to two parameters to the drag axes so you can change them on
-the viewport itself, with the splat visible — tap chips to assign X and Y, then
-drag. Useful on desktop, essential on a phone where the control rail covers the
+the viewport itself, with the splat visible. Focus a parameter, bind X or Y in
+the lane header, then drag. Each axis takes an optional sub-range and invert.
+Useful on desktop, essential on a phone where the control rail covers the
 subject.
 
 Every parameter has a `↺` reset button, which brightens when the value differs
@@ -64,9 +91,9 @@ the slider itself to auto-key. Armed sliders become live readouts of their
 curve. Exports honour envelopes.
 
 **Save JSON** writes the whole editable state — parameters, envelopes, toggles,
-camera keys — as a small text file. The splat is referenced by name only, not
-embedded, so load your capture first and then the preset. Drop a `.json` on the
-viewport to load it.
+camera keys, gesture bindings — as a small text file. The splat is referenced by
+name only, not embedded, so load your capture first and then the preset. Drop a
+`.json` on the viewport to load it.
 
 Keep the tab visible while exporting — Chrome throttles background timers to
 ~1s, which slows the render to roughly a frame per second.
@@ -78,8 +105,10 @@ vs assumed), known issues, and the roadmap. Read **The uniform invariant**
 section before adding an effect — Spark gates its generate pass, and a uniform
 write that does not bump the version is silently invisible.
 
-Splat captures are gitignored; the app loads a remote test asset so the repo is
-runnable as cloned.
+Splat captures are gitignored, with one deliberate exception: `3_3_2025.ply`
+(~11 MB, 44,296 gaussians) is committed as the test asset, so the repo is
+runnable as cloned and every measurement in NOTES has a fixed subject that
+cannot change underneath it.
 
 ## Mobile
 

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>SPLAT BENCH — 3DGS manipulator</title>
+<title>GAUSSEOUS — 3DGS manipulator</title>
 <style>
   :root{
     --void:#08090b;
@@ -215,10 +215,17 @@
      state machine to own beyond persisting it. */
   .mod{border-bottom:1px solid var(--rule); padding:0 16px}
   .mod[open]{padding-bottom:16px}
+  /* Section titles sit on --signal rather than --ink-dim. They were 4.1:1
+     against --chassis, under AA for 10px uppercase at .24em tracking, and
+     genuinely hard to scan; --signal measures ~13:1. This does not overload
+     the accent's "values" meaning from the colour table — a section title is
+     structural navigation in a fixed position and never appears in the same
+     role as an inline readout, so the two cannot be confused. The `em`
+     descriptor stays dim so the title itself still carries the emphasis. */
   .mod > summary{
     margin:0 -16px; padding:13px 16px; cursor:pointer; list-style:none;
     font-size:10px; letter-spacing:.24em; text-transform:uppercase;
-    color:var(--ink-dim); display:flex; align-items:baseline; gap:9px;
+    color:var(--signal); display:flex; align-items:baseline; gap:9px;
   }
   .mod > summary::-webkit-details-marker{display:none}
   .mod > summary::before{content:"+"; color:var(--rule); width:8px}
@@ -226,6 +233,18 @@
   .mod > summary:hover{color:var(--ink)}
   .mod > summary:focus-visible{outline:1px solid var(--signal); outline-offset:-2px}
   .mod > summary em{font-style:normal; color:var(--rule); flex:1; text-align:right}
+  /* Divider inside a group that merges two related effects under one title
+     (Depth = fade + field). Deliberately NOT a <summary> — a second summary
+     inside one <details> is invalid and only the first is the disclosure
+     control, so these are plain headings that read like one. */
+  .subhead{
+    display:flex; align-items:baseline; gap:9px;
+    font-size:10px; letter-spacing:.24em; text-transform:uppercase;
+    color:var(--ink-dim); border-top:1px solid var(--rule);
+    margin:14px -16px 9px; padding:12px 16px 0;
+  }
+  .mod[open] > .subhead:first-of-type{border-top:none; margin-top:2px; padding-top:0}
+  .subhead em{font-style:normal; color:var(--rule); flex:1; text-align:right}
   /* A collapsed group must never hide that something inside it is driven. */
   .gflag{
     font-style:normal; min-width:11px; text-align:center; letter-spacing:0;
@@ -276,6 +295,16 @@
   button:hover{border-color:var(--ink-dim)}
   button:focus-visible, select:focus-visible{outline:1px solid var(--signal); outline-offset:1px}
   button[disabled]{opacity:.35; cursor:default}
+  input[type=number]{
+    font:inherit; color:var(--signal); background:var(--chassis-hi);
+    border:1px solid var(--rule); border-radius:2px; padding:5px 6px;
+    text-align:center; font-variant-numeric:tabular-nums;
+  }
+  input[type=number]:disabled{opacity:.35}
+  input[type=number]:focus-visible{outline:1px solid var(--signal); outline-offset:1px}
+  /* .audlbl is defined under #laneHead for the lane's own controls; the Audio
+     rail section reuses the same small dim caption treatment. */
+  .mod .audlbl{color:var(--ink-dim); letter-spacing:.06em; font-size:10px; align-self:center}
   /* Correct mode outline on the viewport, echoing the gesture-mode outline so
      the two modal states read as visually related but distinguishable
      (--edit violet vs --edit-adjacent). */
@@ -387,7 +416,7 @@
   <button id="gestureToggle" aria-pressed="false" title="Adjust parameters by dragging on the viewport">Adjust</button>
   <div id="gestureHud" class="hide" aria-hidden="true" title="Tap a chip to unbind that axis"></div>
   <div id="drop">
-    <h1>Splat Bench</h1>
+    <h1>Gausseous</h1>
     <p>Drop a <strong>.ply</strong> / .spz / .splat / .sog file here — or tap <em>Choose file</em> —
        or load the test asset to check the pipeline.</p>
     <div class="btns" style="justify-content:center">
@@ -419,12 +448,12 @@
     <button id="audShapeToggle" title="Attack/release/lag/gain/floor/curve shaping" disabled>Shape ▾</button>
     <span class="lsep"></span>
     <label class="audlbl">Mask</label>
-    <select id="maskSrc" title="Scope this parameter to one region slot's mask">
+    <select id="maskSrc" title="Scope this parameter to one mask slot">
       <option value="0">none</option>
-      <option value="1">R1</option>
-      <option value="2">R2</option>
-      <option value="3">R3</option>
-      <option value="4">R4</option>
+      <option value="1">M1</option>
+      <option value="2">M2</option>
+      <option value="3">M3</option>
+      <option value="4">M4</option>
     </select>
     <label class="check"><input type="checkbox" id="maskInv" title="Invert the mask for this parameter only"> Inv</label>
     <span class="lsep"></span>
@@ -479,7 +508,7 @@
   <div id="status">Booting…</div>
 
   <details class="mod" data-group="camera" open>
-    <summary>Shot <em>camera</em><i class="gflag"></i></summary>
+    <summary>Camera <em>move + duration</em><i class="gflag"></i></summary>
     <div class="btns" style="margin-bottom:9px" id="camModeBtns">
       <button type="button" data-mode="manual" title="Mouse/touch orbit only, nothing drives the camera">Manual</button>
       <button type="button" data-mode="keyframes" class="on" title="Camera follows the keyframe path below">Keyframes</button>
@@ -487,8 +516,12 @@
     </div>
     <div class="row"><label>Ease</label><output id="o-ease">—</output>
       <input type="range" id="p-ease" min="0" max="1" step="0.01" value="0.8"></div>
+    <!-- step="any", not 0.5: Audio's "× set" writes an exact multiple of the
+         track length here, and a snapping step would land the timeline a few
+         ms off the loop point every time. max widened from 30 to 120 for the
+         same reason — looping a 30s track even twice needs more than 30. -->
     <div class="row"><label>Duration (s)</label><output id="o-dur">—</output>
-      <input type="range" id="p-dur" min="1" max="30" step="0.5" value="8"></div>
+      <input type="range" id="p-dur" min="1" max="120" step="any" value="8"></div>
 
     <div class="btns" style="margin:9px 0" id="camKeyBtns">
       <button id="camAddKey" title="Add a camera keyframe at the current playhead">Add key</button>
@@ -526,7 +559,7 @@
   </details>
 
   <details class="mod" data-group="model">
-    <summary>Model <em>correct</em><i class="gflag" id="modelFlag"></i></summary>
+    <summary>Transform <em>correct</em><i class="gflag" id="modelFlag"></i></summary>
     <div class="btns" style="margin-bottom:9px">
       <button id="correctToggle" aria-pressed="false">Correct</button>
       <button id="xformCommit" disabled>Commit</button>
@@ -561,7 +594,7 @@
   </details>
 
   <details class="mod" data-group="trim">
-    <summary>Trim <em>per-splat cull</em><i class="gflag"></i></summary>
+    <summary>Opacity <em>per-splat cull</em><i class="gflag"></i></summary>
     <div class="row"><label>Min opacity</label><output id="o-cullA">—</output>
       <input type="range" id="p-cullA" min="0" max="1" step="0.005" value="0"></div>
     <div class="row"><label>Max splat size</label><output id="o-cullS">—</output>
@@ -571,12 +604,12 @@
   </details>
 
   <details class="mod" data-group="region">
-    <summary>Region <em>sdf mask, 4 slots</em><i class="gflag"></i></summary>
+    <summary>Masks <em>sdf, 4 slots</em><i class="gflag"></i></summary>
     <div class="btns" style="margin-bottom:9px" id="rgSlots">
-      <button type="button" data-slot="0" class="on">R1</button>
-      <button type="button" data-slot="1">R2</button>
-      <button type="button" data-slot="2">R3</button>
-      <button type="button" data-slot="3">R4</button>
+      <button type="button" data-slot="0" class="on">M1</button>
+      <button type="button" data-slot="1">M2</button>
+      <button type="button" data-slot="2">M3</button>
+      <button type="button" data-slot="3">M4</button>
     </div>
     <div class="btns" style="margin-bottom:9px">
       <select id="rgMode" title="What this slot does to the splats inside it">
@@ -602,14 +635,62 @@
       unconditionally so no shape change ever recompiles. Centre and size are in units of
       scene radius. <strong>Shrink</strong> softens splat scale toward the edge, replacing
       the old Reveal effect's shrink-into-edge (a plane region in Cut mode reproduces it).
-      Colorize R/G/B only apply in Colorize mode. Any of Displace / Saturation / Tint / Trim
+      Colorize R/G/B only apply in Colorize mode. Any of Noise / Saturation / Tint / Opacity
       below can be scoped to one of these four slots via its own <em>Mask</em> control in the
       lane — independent of what this slot's own Mode is doing.
     </p>
   </details>
 
+  <details class="mod" data-group="depth">
+    <summary>Depth <em>fade + field</em><i class="gflag"></i></summary>
+    <div class="subhead">Depth fade <em>aerial perspective</em></div>
+    <p style="color:var(--ink-dim); margin:0 0 8px">Fades opacity and tints toward the current Background colour with distance — dissolves distant splats into the backdrop. No effect at Amount 0.</p>
+    <div class="btns" style="margin-bottom:9px">
+      <select id="dpMode" title="Planar: distance along the camera's view direction (a Z-depth). Radial: straight-line distance to the camera.">
+        <option value="planar" selected>Planar (view direction)</option>
+        <option value="radial">Radial (distance)</option>
+      </select>
+    </div>
+    <div class="row"><label>Amount</label><output id="o-dpAmt">—</output>
+      <input type="range" id="p-dpAmt" min="0" max="1" step="0.01" value="0"></div>
+    <div class="row"><label>Near</label><output id="o-dpNear">—</output>
+      <input type="range" id="p-dpNear" min="0" max="5" step="0.02" value="1"></div>
+    <div class="row"><label>Far</label><output id="o-dpFar">—</output>
+      <input type="range" id="p-dpFar" min="0" max="8" step="0.02" value="3"></div>
+    <div class="subhead">Depth of field <em>lens blur</em></div>
+    <p style="color:var(--ink-dim); margin:0 0 8px">Spark's own per-splat circle-of-confusion blur — a defocused splat is exactly another (wider, dimmer) Gaussian, so this composites correctly through the existing sort with no special handling. No effect at Aperture 0.</p>
+    <div class="btns" style="margin-bottom:9px">
+      <select id="dofFocusSrc" title="Manual: use the Focus slider below. Mask: track that slot's centre distance from the camera every frame, so moving or animating the mask pulls focus.">
+        <option value="manual" selected>Manual focus</option>
+        <option value="1">Focus-pull: Mask 1</option>
+        <option value="2">Focus-pull: Mask 2</option>
+        <option value="3">Focus-pull: Mask 3</option>
+        <option value="4">Focus-pull: Mask 4</option>
+      </select>
+    </div>
+    <div class="row"><label>Focus</label><output id="o-dofFocus">—</output>
+      <input type="range" id="p-dofFocus" min="0" max="8" step="0.02" value="2"></div>
+    <div class="row"><label>Aperture</label><output id="o-dofAperture">—</output>
+      <input type="range" id="p-dofAperture" min="0" max="30" step="0.1" value="0"></div>
+    <p style="color:var(--ink-dim); margin:8px 0 0">Gaussian bokeh only — no aperture shape, no cat's-eye, no shaped highlight discs. Those need a custom splat shader; out of scope here.</p>
+  </details>
+
+  <details class="mod" data-group="colour">
+    <summary>Colour <em>tint + saturation</em><i class="gflag"></i></summary>
+    <div class="row"><label>Brightness</label><output id="o-bright">—</output>
+      <input type="range" id="p-bright" min="0" max="2" step="0.01" value="1"></div>
+    <div class="row"><label>R</label><output id="o-tR">—</output>
+      <input type="range" id="p-tR" min="0" max="2" step="0.01" value="1"></div>
+    <div class="row"><label>G</label><output id="o-tG">—</output>
+      <input type="range" id="p-tG" min="0" max="2" step="0.01" value="1"></div>
+    <div class="row"><label>B</label><output id="o-tB">—</output>
+      <input type="range" id="p-tB" min="0" max="2" step="0.01" value="1"></div>
+    <div class="row"><label>Saturation</label><output id="o-sat">—</output>
+      <input type="range" id="p-sat" min="0" max="2" step="0.01" value="1"></div>
+  </details>
+
   <details class="mod" data-group="displace">
-    <summary>Displace <em>noise field</em><i class="gflag"></i></summary>
+    <summary>Noise <em>displacement field</em><i class="gflag"></i></summary>
     <div class="btns" style="margin-bottom:9px">
       <select id="dField" title="Sin: the original field. Curl: volume-preserving swirl, does not inflate the cloud.">
         <option value="sin" selected>Sin field</option>
@@ -675,7 +756,7 @@
 
   <details class="mod" data-group="wave">
     <summary>Wave <em>index-phase sweep</em><i class="gflag"></i></summary>
-    <p style="color:var(--ink-dim); margin:0 0 8px">Modulates Displace amount, Quantise amount and each Region's Attract amount with a per-splat, animated 0..1 envelope — so those effects sweep through the cloud instead of applying uniformly. No effect at Amount 0.</p>
+    <p style="color:var(--ink-dim); margin:0 0 8px">Modulates Noise amount, Quantise amount and each Mask's Attract amount with a per-splat, animated 0..1 envelope — so those effects sweep through the cloud instead of applying uniformly. No effect at Amount 0.</p>
     <div class="btns" style="margin-bottom:9px">
       <select id="wMode" title="Per-splat phase source">
         <option value="hash" selected>Per-splat (hash)</option>
@@ -692,42 +773,6 @@
       <input type="range" id="p-wSpd" min="0" max="3" step="0.01" value="0.3"></div>
   </details>
 
-  <details class="mod" data-group="depth">
-    <summary>Depth fade <em>aerial perspective</em><i class="gflag"></i></summary>
-    <p style="color:var(--ink-dim); margin:0 0 8px">Fades opacity and tints toward the current Background colour with distance — dissolves distant splats into the backdrop. No effect at Amount 0.</p>
-    <div class="btns" style="margin-bottom:9px">
-      <select id="dpMode" title="Planar: distance along the camera's view direction (a Z-depth). Radial: straight-line distance to the camera.">
-        <option value="planar" selected>Planar (view direction)</option>
-        <option value="radial">Radial (distance)</option>
-      </select>
-    </div>
-    <div class="row"><label>Amount</label><output id="o-dpAmt">—</output>
-      <input type="range" id="p-dpAmt" min="0" max="1" step="0.01" value="0"></div>
-    <div class="row"><label>Near</label><output id="o-dpNear">—</output>
-      <input type="range" id="p-dpNear" min="0" max="5" step="0.02" value="1"></div>
-    <div class="row"><label>Far</label><output id="o-dpFar">—</output>
-      <input type="range" id="p-dpFar" min="0" max="8" step="0.02" value="3"></div>
-  </details>
-
-  <details class="mod" data-group="dof">
-    <summary>Depth of field <em>lens blur</em><i class="gflag"></i></summary>
-    <p style="color:var(--ink-dim); margin:0 0 8px">Spark's own per-splat circle-of-confusion blur — a defocused splat is exactly another (wider, dimmer) Gaussian, so this composites correctly through the existing sort with no special handling. No effect at Aperture 0.</p>
-    <div class="btns" style="margin-bottom:9px">
-      <select id="dofFocusSrc" title="Manual: use the Focus slider below. Region: track that slot's centre distance from the camera every frame, so moving or animating the region pulls focus.">
-        <option value="manual" selected>Manual focus</option>
-        <option value="1">Focus-pull: Region 1</option>
-        <option value="2">Focus-pull: Region 2</option>
-        <option value="3">Focus-pull: Region 3</option>
-        <option value="4">Focus-pull: Region 4</option>
-      </select>
-    </div>
-    <div class="row"><label>Focus</label><output id="o-dofFocus">—</output>
-      <input type="range" id="p-dofFocus" min="0" max="8" step="0.02" value="2"></div>
-    <div class="row"><label>Aperture</label><output id="o-dofAperture">—</output>
-      <input type="range" id="p-dofAperture" min="0" max="30" step="0.1" value="0"></div>
-    <p style="color:var(--ink-dim); margin:8px 0 0">Gaussian bokeh only — no aperture shape, no cat's-eye, no shaped highlight discs. Those need a custom splat shader; out of scope here.</p>
-  </details>
-
   <details class="mod" data-group="smear">
     <summary>Smear <em>screen-space streak</em><i class="gflag"></i></summary>
     <p style="color:var(--ink-dim); margin:0 0 8px">Stretches each splat's own projected shape along a fixed screen-space direction — the same covariance-plus-energy-correction machinery Depth of field uses, so the two compose. Screen-space, not per-splat: a uniform streak direction, not each splat's own motion. No effect at Amount 0.</p>
@@ -737,18 +782,29 @@
       <input type="range" id="p-smearAngle" min="0" max="180" step="1" value="0"></div>
   </details>
 
-  <details class="mod" data-group="colour">
-    <summary>Colour <em>tint + saturation</em><i class="gflag"></i></summary>
-    <div class="row"><label>Brightness</label><output id="o-bright">—</output>
-      <input type="range" id="p-bright" min="0" max="2" step="0.01" value="1"></div>
-    <div class="row"><label>R</label><output id="o-tR">—</output>
-      <input type="range" id="p-tR" min="0" max="2" step="0.01" value="1"></div>
-    <div class="row"><label>G</label><output id="o-tG">—</output>
-      <input type="range" id="p-tG" min="0" max="2" step="0.01" value="1"></div>
-    <div class="row"><label>B</label><output id="o-tB">—</output>
-      <input type="range" id="p-tB" min="0" max="2" step="0.01" value="1"></div>
-    <div class="row"><label>Saturation</label><output id="o-sat">—</output>
-      <input type="range" id="p-sat" min="0" max="2" step="0.01" value="1"></div>
+  <details class="mod" data-group="audio">
+    <summary>Audio <em>fft drive</em><i class="gflag"></i></summary>
+    <div class="btns" style="margin-bottom:9px">
+      <button id="audLoad">Load audio</button>
+      <button id="audMute" disabled>Mute</button>
+      <button id="audClear" disabled>Clear</button>
+    </div>
+    <div id="audName" style="color:var(--ink-dim); margin-bottom:8px">no audio loaded</div>
+    <div class="btns" style="margin-bottom:9px">
+      <button id="audLoopBtn" disabled title="Repeat the track for as long as the timeline runs. Off, a track shorter than Duration plays once and the remainder is silent.">Loop</button>
+      <label class="audlbl" style="margin-left:4px">Duration</label>
+      <input type="number" id="audLoops" min="1" max="64" step="1" value="1"
+             style="width:44px" title="Number of track lengths to fit into Duration">
+      <button id="audFitDur" disabled title="Set Duration to exactly this many track lengths">× set</button>
+    </div>
+    <div class="meter"><label>Low</label><div class="bar"><i id="m-low"></i></div><output id="o-mlow">0.00</output></div>
+    <div class="meter"><label>Mid</label><div class="bar"><i id="m-mid"></i></div><output id="o-mmid">0.00</output></div>
+    <div class="meter"><label>High</label><div class="bar"><i id="m-high"></i></div><output id="o-mhigh">0.00</output></div>
+    <p style="color:var(--ink-dim); margin:8px 0 0">
+      Analysed offline into per-band envelopes, not sampled live — so scrubbing, playback
+      and export all read the same values. Click a parameter's <em>name</em> to focus it,
+      then pick a band in the lane below. Audio adds on top of any envelope.
+    </p>
   </details>
 
   <details class="mod" data-group="output" open>
@@ -775,24 +831,6 @@
       Each frame now awaits Spark's own generate+sort completion, so this should stay
       at 0. It is an extra manual wait kept only as an escape hatch if a capture ever
       still shows wrong-order blending that the live view doesn't.
-    </p>
-  </details>
-
-  <details class="mod" data-group="audio">
-    <summary>Audio <em>fft drive</em><i class="gflag"></i></summary>
-    <div class="btns" style="margin-bottom:9px">
-      <button id="audLoad">Load audio</button>
-      <button id="audMute" disabled>Mute</button>
-      <button id="audClear" disabled>Clear</button>
-    </div>
-    <div id="audName" style="color:var(--ink-dim); margin-bottom:8px">no audio loaded</div>
-    <div class="meter"><label>Low</label><div class="bar"><i id="m-low"></i></div><output id="o-mlow">0.00</output></div>
-    <div class="meter"><label>Mid</label><div class="bar"><i id="m-mid"></i></div><output id="o-mmid">0.00</output></div>
-    <div class="meter"><label>High</label><div class="bar"><i id="m-high"></i></div><output id="o-mhigh">0.00</output></div>
-    <p style="color:var(--ink-dim); margin:8px 0 0">
-      Analysed offline into per-band envelopes, not sampled live — so scrubbing, playback
-      and export all read the same values. Click a parameter's <em>name</em> to focus it,
-      then pick a band in the lane below. Audio adds on top of any envelope.
     </p>
   </details>
 
@@ -845,7 +883,7 @@ const setStatus = (msg, warn = false) => {
   const el = $("status");
   el.textContent = msg;
   el.classList.toggle("warn", warn);
-  if (warn) console.error("[splat-bench]", msg);
+  if (warn) console.error("[gausseous]", msg);
 };
 addEventListener("error", (e) => setStatus("JS error: " + e.message, true));
 addEventListener("unhandledrejection", (e) =>
@@ -1628,7 +1666,10 @@ for (let i = 1; i <= MAX_REGIONS; i++) {
 }
 
 const SPEC = [
-  ["ease", 2, "camera"], ["dur", 1, "camera"],
+  /* dur at 2dp, not 1: with step="any" it holds exact loop multiples like
+     24.69 and a 1dp readout would misreport what the timeline is actually
+     running. */
+  ["ease", 2, "camera"], ["dur", 2, "camera"],
   ["obTurns", 2, "camera"], ["obPhase", 3, "camera"], ["obElev", 3, "camera"], ["obDist", 2, "camera"],
   ["cullA", 2, "trim"], ["cullS", 4, "trim"], ["scale", 2, "trim"],
   ...REGION_SPEC,
@@ -1641,7 +1682,10 @@ const SPEC = [
   ["qStrat", 2, "quantise"], ["qPoster", 2, "quantise"],
   ["wAmt", 2, "wave"], ["wFreq", 2, "wave"], ["wSpd", 2, "wave"],
   ["dpAmt", 2, "depth"], ["dpNear", 2, "depth"], ["dpFar", 2, "depth"],
-  ["dofFocus", 2, "dof"], ["dofAperture", 1, "dof"],
+  /* Depth fade and depth of field share one "Depth" section in the rail, so
+     they share one group id — refreshGroups()'s driven/dirty flag then counts
+     the whole section, which is what the collapsed title should report. */
+  ["dofFocus", 2, "depth"], ["dofAperture", 1, "depth"],
   ["smearAmt", 1, "smear"], ["smearAngle", 0, "smear"],
   ["bright", 2, "colour"],
   ["tR", 2, "colour"], ["tG", 2, "colour"], ["tB", 2, "colour"],
@@ -1768,6 +1812,16 @@ function envValue(id, t) {
 const BANDS = { low: [20, 200], mid: [200, 2000], high: [2000, 16000] };
 const ENV_RATE = 200;                 // envelope samples per second
 
+/* Loop: when the timeline outruns the track, repeat it instead of going
+   silent. Deliberately ONE flag read by four places that all have to agree —
+   envelope lookup (sampleArr), monitoring playback (audioSeek/audioFollow),
+   the export muxer (encodeAudioTrack) and the sparkline playhead. If any one
+   of them clamped while the others wrapped, the preview and the export would
+   disagree, which is the exact failure the offline-envelope design exists to
+   prevent. Declared here, at the top of the audio block, ahead of every
+   function that reads it — see the TDZ note in NOTES. */
+let audioLoop = false;
+
 const AUD = {};                       // id -> { band, depth, attack, release, lag, gain, floor, curve }
 const audOf = (id) =>
   (AUD[id] ??= { band: "", depth: 0, attack: 0, release: 120, lag: 0, gain: 1, floor: 0, curve: 1 });
@@ -1869,9 +1923,22 @@ function audioAt(band, seconds) {
 
 function sampleArr(arr, seconds) {
   if (!arr || !arr.length) return 0;
-  const x = Math.min(Math.max(seconds, 0), audioDur) * ENV_RATE;
+  let t = seconds;
+  if (audioLoop && audioDur > 0) {
+    t %= audioDur;
+    if (t < 0) t += audioDur;      // negative lag wraps to the tail, not to silence
+  } else {
+    t = Math.min(Math.max(t, 0), audioDur);
+  }
+  const x = t * ENV_RATE;
   const i = Math.floor(x);
-  if (i >= arr.length - 1) return arr[arr.length - 1] ?? 0;
+  if (i >= arr.length - 1) {
+    const last = arr[arr.length - 1] ?? 0;
+    /* Looping, the final sample interpolates back into the first rather than
+       holding — otherwise every wrap puts a flat step at the seam. */
+    if (audioLoop && audioDur > 0) return last + ((arr[0] ?? 0) - last) * Math.min(1, Math.max(0, x - i));
+    return last;
+  }
   return arr[i] + (arr[i + 1] - arr[i]) * (x - i);   // linear, no stepping
 }
 
@@ -2144,7 +2211,12 @@ function refreshKeyBtn(id) {
  * Open/closed state lives in localStorage, deliberately NOT in presets: it
  * describes your workspace, not the look, exactly like `Mobile profile`.
  * ------------------------------------------------------------------ */
-const ACCORDION_KEY = "splatbench.accordion.v1";
+/* v2, and renamed with the app: the section set changed in the same release
+   (Depth of field folded into Depth), so a stored v1 layout would restore
+   open/closed state for a group that no longer exists. Cheapest correct
+   answer is a new key — this is workspace state, not project data, and
+   losing it costs one click. */
+const ACCORDION_KEY = "gausseous.accordion.v2";
 const groupIds = (g) => SPEC.filter(([, , gg]) => gg === g).map(([id]) => id);
 
 function saveAccordion() {
@@ -2890,7 +2962,14 @@ function reframe() {
 
 $("pick").onclick = $("reload").onclick = () => $("file").click();
 $("reframe").onclick = reframe;
-$("demo").onclick = () => loadSplat("https://sparkjs.dev/assets/splats/butterfly.spz", "butterfly.spz");
+/* The test asset is served from the repo itself rather than Spark's CDN, so
+   the app has a known, version-stable subject that cannot change or vanish
+   underneath a measurement. Every figure in NOTES from this point on is
+   against this capture; earlier ones are against butterfly.spz and are not
+   comparable splat-for-splat. Relative URL so it works identically on
+   localhost and on Pages. */
+const TEST_ASSET = "./3_3_2025.ply";
+$("demo").onclick = () => loadSplat(TEST_ASSET, "3_3_2025.ply");
 /* ------------------------------------------------------------------ *
  * File routing
  *
@@ -3376,8 +3455,11 @@ async function drain(encoder, below) {
    Duration longer or shorter than the track (see audioFollow()'s own
    comment): audio plays from t=0 for its own length or until the clip
    ends, whichever is shorter, and is simply silent for any remainder if
-   the clip is longer. No looping — export is a single linear pass, so the
-   timeline-loop case audioFollow() handles does not apply here.
+   the clip is longer.
+
+   With Loop on, the track repeats to fill `endSeconds` instead, matching
+   what the preview and the envelope lookup do — all four readers of
+   `audioLoop` have to agree or the export stops matching the preview.
 
    Runs as a separate phase AFTER the video frame loop, not interleaved
    frame-by-frame — VideoEncoder and AudioEncoder are independent state
@@ -3387,10 +3469,9 @@ async function drain(encoder, below) {
 async function encodeAudioTrack(muxer, endSeconds) {
   const sampleRate = audioBuffer.sampleRate;
   const channels = audioBuffer.numberOfChannels;
-  const totalFrames = Math.max(0, Math.min(
-    Math.round(endSeconds * sampleRate),
-    audioBuffer.length,
-  ));
+  const totalFrames = audioLoop
+    ? Math.max(0, Math.round(endSeconds * sampleRate))
+    : Math.max(0, Math.min(Math.round(endSeconds * sampleRate), audioBuffer.length));
   if (totalFrames === 0) return;
 
   const audioEncoder = new AudioEncoder({
@@ -3411,7 +3492,16 @@ async function encodeAudioTrack(muxer, endSeconds) {
     // f32-planar: each channel's samples laid out contiguously, one after another
     const planar = new Float32Array(frames * channels);
     for (let ch = 0; ch < channels; ch++) {
-      planar.set(channelData[ch].subarray(start, start + frames), ch * frames);
+      const src = channelData[ch];
+      if (audioLoop) {
+        /* Per-sample, not subarray(): a chunk can straddle a loop seam, and
+           subarray would run off the end of the buffer and pad with silence
+           at exactly the point the track should be starting over. */
+        const base = ch * frames;
+        for (let n = 0; n < frames; n++) planar[base + n] = src[(start + n) % src.length];
+      } else {
+        planar.set(src.subarray(start, start + frames), ch * frames);
+      }
     }
     const audioData = new AudioData({
       format: "f32-planar",
@@ -3548,7 +3638,7 @@ $("render").onclick = async () => {
     const blob = new Blob([muxer.target.buffer], { type: "video/mp4" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `splat-bench-${Date.now()}.mp4`;
+    a.download = `gausseous-${Date.now()}.mp4`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 10000);
     setStatus(`Rendered ${total} frames${includeAudio ? " + audio" : ""} — ${(blob.size / 1e6).toFixed(1)} MB.`);
@@ -3578,7 +3668,12 @@ $("render").onclick = async () => {
  * and often not redistributable; embedding one would make presets unusable
  * as the small shareable text files they are meant to be.
  * ------------------------------------------------------------------ */
-const PRESET_FORMAT = "splat-bench-preset";
+/* Renamed with the app. Presets written before the rename carry the old tag,
+   so BOTH are accepted on load and only the new one is ever written — the
+   same forgiving-load / strict-save rule the version migrations already
+   follow. */
+const PRESET_FORMAT = "gausseous-preset";
+const PRESET_FORMAT_LEGACY = "splat-bench-preset";
 const PRESET_VERSION = 5;   // v2 selects; v3 audio; v4 regions+mask; v5 camera keyframes
 /* `mobileMode` is deliberately absent: it is a property of the device you are
    sitting at, not of the look. A preset saved on a desktop must not force a
@@ -3635,6 +3730,8 @@ function serialize() {
        embedded, exactly as the splat is — reload the track, keep the routing. */
     audio: {
       name: audioName,
+      /* Additive, no version bump — absent means false, the old behaviour. */
+      loop: audioLoop,
       routes: Object.fromEntries(
         Object.entries(AUD)
           .filter(([, a]) => a.band && a.depth)
@@ -3653,7 +3750,7 @@ function serialize() {
    A preset is a plain text file a user may well have hand-edited. */
 function applyPreset(o) {
   applyPreset.migrationNotes = [];       // readPreset() reads this after return
-  if (!o || o.format !== PRESET_FORMAT) throw new Error("not a splat-bench preset");
+  if (!o || (o.format !== PRESET_FORMAT && o.format !== PRESET_FORMAT_LEGACY)) throw new Error("not a Gausseous preset");
   if (!Number.isFinite(o.version)) throw new Error("preset has no version");
   if (o.version > PRESET_VERSION) {
     throw new Error(`preset version ${o.version} is newer than this build (${PRESET_VERSION})`);
@@ -3716,6 +3813,7 @@ function applyPreset(o) {
   for (const id of ANIM) {
     AUD[id] = { band: "", depth: 0, attack: 0, release: 120, lag: 0, gain: 1, floor: 0, curve: 1 };
   }
+  audioLoop = !!o.audio?.loop;                    // additive; absent means false
   for (const [id, src] of Object.entries(o.audio?.routes ?? {})) {
     if (!ANIM.includes(id)) continue;
     if (!Object.hasOwn(BANDS, src?.band)) continue;
@@ -3912,6 +4010,9 @@ function applyPreset(o) {
   syncSliders();
   refreshKeyBtns();
   laneHead();
+  refreshAudioLoopUI();
+  audioSeek();
+  audioFollow();
   drawLane();
   updateClock();
 }
@@ -4172,8 +4273,10 @@ function drawSparkline() {
   ctx.stroke();
 
   const seconds = playhead * P.dur;
-  if (seconds <= audioDur) {
-    const px = (seconds / Math.max(audioDur, 1e-6)) * cw;
+  /* The sparkline draws ONE pass of the track, so when looping the marker
+     wraps with it rather than running off the right-hand edge. */
+  if (audioLoop || seconds <= audioDur) {
+    const px = ((audioLoop && audioDur > 0 ? seconds % audioDur : seconds) / Math.max(audioDur, 1e-6)) * cw;
     ctx.strokeStyle = CSSVAR("--live", "#ff5a3c");
     ctx.globalAlpha = 0.6;
     ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, ch); ctx.stroke();
@@ -4183,6 +4286,54 @@ function drawSparkline() {
 addEventListener("resize", drawSparkline);
 
 $("audLoad").onclick = () => $("audioFile").click();
+
+/* Loop / Duration x N.
+ *
+ * "x set" writes Duration through the p-dur slider's own `input` event rather
+ * than assigning P.dur — the slider is the single write path for every
+ * parameter (auto-key on an armed envelope, dirty marking, the dur/dpr side
+ * effects, pushUniforms all hang off it), and a second one is exactly what
+ * the gesture phase went out of its way not to add. */
+function refreshAudioLoopUI() {
+  const has = !!audioDur;
+  $("audLoopBtn").disabled = !has;
+  $("audFitDur").disabled = !has;
+  $("audLoops").disabled = !has;
+  $("audLoopBtn").classList.toggle("on", audioLoop);
+  const n = loopCount();
+  $("audFitDur").textContent = has ? `= ${(audioDur * n).toFixed(2)}s` : "× set";
+  $("audFitDur").title = has
+    ? `Set Duration to ${n} × ${audioDur.toFixed(2)}s = ${(audioDur * n).toFixed(2)}s`
+    : "Load a track first";
+}
+function loopCount() {
+  const max = audioDur > 0 ? Math.max(1, Math.floor(Number($("p-dur").max) / audioDur)) : 64;
+  return Math.max(1, Math.min(max, Math.round(Number($("audLoops").value) || 1)));
+}
+$("audLoopBtn").onclick = () => {
+  audioLoop = !audioLoop;
+  refreshAudioLoopUI();
+  audioSeek();
+  audioFollow();
+  drawSparkline();
+};
+$("audLoops").oninput = () => refreshAudioLoopUI();
+$("audFitDur").onclick = () => {
+  if (!audioDur) return;
+  const n = loopCount();
+  $("audLoops").value = String(n);          // reflect any clamp back into the field
+  const el = $("p-dur");
+  el.value = String(audioDur * n);
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+  /* Fitting more than one length only means anything if the track repeats,
+     so arm Loop with it rather than leaving a silent tail behind. */
+  if (n > 1 && !audioLoop) audioLoop = true;
+  refreshAudioLoopUI();
+  audioSeek();
+  audioFollow();
+  drawSparkline();
+  setStatus(`Duration set to ${n} × track = ${(audioDur * n).toFixed(2)}s${audioLoop ? ", looping" : ""}.`);
+};
 
 /* ------------------------------------------------------------------ *
  * Region mask routing — scope one of the 6 maskable parameters to a
@@ -4219,6 +4370,7 @@ async function loadAudio(file) {
     $("audName").textContent = `${audioName} — ${audioDur.toFixed(1)}s`;
     $("audMute").disabled = false;
     $("audClear").disabled = false;
+    refreshAudioLoopUI();
     audioFollow();
     setStatus(`${audioName} analysed — ${audioDur.toFixed(1)}s, 3 bands.`);
     pushUniforms();
@@ -4241,13 +4393,19 @@ let muted = false;
 
 function audioSeek() {
   if (!audioEl || !audioDur) return;
-  const t = Math.min(playhead * P.dur, Math.max(audioDur - 0.01, 0));
+  const raw = playhead * P.dur;
+  const t = audioLoop
+    ? raw % audioDur                                     // wrap into the track
+    : Math.min(raw, Math.max(audioDur - 0.01, 0));
   if (Math.abs(audioEl.currentTime - t) > 0.06) audioEl.currentTime = t;
 }
 
 function audioFollow() {
   if (!audioEl) return;
-  const want = playing && !muted && !rendering && playhead * P.dur < audioDur;
+  /* Looping, the element loops itself — the frame loop's audioSeek() only has
+     to correct drift, not restart playback at every wrap. */
+  audioEl.loop = audioLoop;
+  const want = playing && !muted && !rendering && (audioLoop || playhead * P.dur < audioDur);
   if (want && audioEl.paused) {
     audioSeek();
     audioEl.play().catch((err) => {
@@ -4278,6 +4436,7 @@ $("audClear").onclick = () => {
   $("audName").textContent = "no audio loaded";
   $("audMute").disabled = true;
   $("audClear").disabled = true;
+  refreshAudioLoopUI();
   pushUniforms(); audMeters(); syncSliders(); laneHead();
   setStatus("Audio cleared.");
 };
@@ -4286,7 +4445,7 @@ $("savePreset").onclick = () => {
   const blob = new Blob([JSON.stringify(serialize(), null, 2)], { type: "application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = `splat-bench-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.json`;
+  a.download = `gausseous-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.json`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 10000);
   const n = Object.values(ENV).filter((e) => e.keys.length).length;
@@ -4430,6 +4589,7 @@ if (new URLSearchParams(location.search).has("debug")) {
  * ------------------------------------------------------------------ */
 initAccordion();
 refreshGroups();
+refreshAudioLoopUI();
 pushUniforms();
 updateClock();
 showDpr();

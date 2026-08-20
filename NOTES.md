@@ -1,4 +1,4 @@
-# Splatification — project notes
+# Gausseous — project notes
 
 Working folder: `/Users/55147209/Documents/Claude_Builds/Splatification`
 Main file: `index.html` (single file, no build step, no npm install)
@@ -8,7 +8,16 @@ ES modules will **not** load over `file://` — it must be served.
 It is `index.html` rather than a descriptive name so GitHub Pages serves it at
 the repo root with no path. `splat-bench.html` remains as a redirect stub for
 older links and carries the query string across, so `?debug=1` survives.
-Live at <https://quixbrics.github.io/splatification/>.
+Live at <https://quixbrics.github.io/gausseous/>.
+
+**Renamed from Splatification / Splat Bench.** The local working folder keeps
+its old path — renaming it would break nothing in the app but every absolute
+path in this file, and the folder name is not something the app or Pages reads.
+What did change: the repo name, the Pages URL (GitHub redirects the old one),
+the `<title>`/`<h1>`, the export filename prefixes, the `localStorage`
+accordion key, and the preset format tag. The old `splat-bench-preset` tag is
+still **accepted** on load and never written — forgiving load, strict save, the
+same rule the version migrations follow.
 
 ---
 
@@ -2298,6 +2307,29 @@ sufficient on its own. Two consecutive **zeros** agree, and zero is exactly the
 not-yet-warm signature. The rule is: two consecutive agreeing reads that are
 also non-zero, with a cap.
 
+### Check the background pixel, not just the coverage — it separates two
+### different zeros
+
+A **hidden tab** produces the same all-zero coverage as a cold generator, and
+they need opposite responses: warm up more, versus front the tab and start
+over. There is a one-value discriminator, and it costs nothing because the
+probe already reads the corner pixel to establish the background:
+
+| corner pixel | meaning |
+|---|---|
+| `[8, 9, 11]` (the `void` colour) | the buffer is real; zero coverage is a genuine render result or a cold generator |
+| `[0, 0, 0]` | the buffer was never composited — the tab is hidden, **every** number from this read is meaningless |
+
+Hit live while running the post-rename regression sweep: an entire 10-effect
+sweep came back all-zero and "all restored", which reads like a pass and is
+actually the harness measuring a black rectangle. `document.hidden` was `true`;
+Chrome stops rAF in a background tab, which NOTES already warned about, but the
+failure presents as *plausible data* rather than an error, which is what makes
+it dangerous. So the probe's stability check now requires a non-zero background
+as well: **stable, non-zero coverage, on a real background.** Front the pane
+tab before measuring, and treat a `[0,0,0]` corner as "no reading taken",
+never as a value.
+
 ---
 
 ## Gesture mode — direct manipulation
@@ -2714,10 +2746,148 @@ Evaluate B2 only after living with B1.
 
 ---
 
+## Rail reorganisation, renames, and audio loop
+
+One release, four separate changes, recorded together because they landed
+together.
+
+### Section names and order
+
+The rail is now ordered as a pipeline — what the splat *is*, then what is done
+to it, then how it leaves — rather than in the order effects happened to be
+built:
+
+`Camera · Transform · Opacity · Masks · Depth · Colour · Noise · Quantise ·
+Wave · Smear · Audio · Output · Preset · Viewport`
+
+Renamed: Shot → **Camera**, Model → **Transform**, Trim → **Opacity**, Region →
+**Masks**, Displace → **Noise**. The old names were the internal names for the
+mechanisms; the new ones are what the controls actually do to the picture.
+
+**`data-group` ids were deliberately NOT renamed.** `trim`, `region`,
+`displace` still identify those groups in `SPEC`, `refreshGroups()`, the
+accordion store and the mask/region uniforms. Renaming them would have touched
+the dyno graph, the preset region block and 36 generated row ids to change a
+string nobody sees. Display labels are in the markup; group ids are plumbing.
+The one place this leaks is the region slot buttons, relabelled `R1..R4` →
+`M1..M4` in both the Masks section and the lane's Mask dropdown, since those
+*are* user-facing.
+
+**Depth fade and depth of field merged into one `Depth` section**, per the
+request. They are two different mechanisms — fade runs in the dyno graph, field
+runs in Spark's vertex shader — but they answer the same question, so they now
+share a group id (`depth`) and `refreshGroups()` counts the whole section. The
+two halves are separated by `.subhead` divs, **not** a second `<summary>`: a
+`<details>` has exactly one disclosure control and a second `<summary>` inside
+it is invalid, so these are plain headings styled to read like one.
+
+**"Shear" in the request was read as "Smear."** There is no shear effect and
+never was; Smear sits at exactly the position Shear was asked for in the
+ordering, and shear (a skew) is not what the effect does (a directional
+streak). Named Smear.
+
+### Section titles moved to `--signal`
+
+They were `--ink-dim` on `--chassis` — about **4.1:1**, under AA for 10px
+uppercase at `.24em` tracking, and genuinely hard to scan. Now `--signal`, at
+about **13:1**.
+
+This does not add a fourth accent or overload the third. A section title is
+structural navigation in a fixed position and never appears in the same role as
+an inline value readout, so the two cannot be confused — unlike, say, putting
+`--signal` on a button, which would read as "this holds a value." The `em`
+descriptor stays on `--rule` so the title itself still carries the emphasis.
+
+### Audio loop, and Duration × N
+
+Two controls in the Audio section, one mechanism.
+
+**Loop** repeats a track shorter than the timeline instead of going silent
+after it ends. The whole design constraint is that **four readers have to
+agree**, or the preview stops predicting the export — which is the exact
+failure the offline-envelope architecture exists to prevent:
+
+| reader | looping behaviour |
+|---|---|
+| `sampleArr()` — envelope lookup | wraps modulo `audioDur` instead of clamping |
+| `audioSeek()` / `audioFollow()` — monitoring | wraps, and sets `audioEl.loop` so the element loops itself |
+| `encodeAudioTrack()` — export muxer | repeats the PCM to fill `endSeconds` |
+| `drawSparkline()` — lane readout | playhead marker wraps within the one drawn pass |
+
+So it is **one** `audioLoop` flag, declared at the top of the audio block ahead
+of every function that reads it (the TDZ rule from the gesture phase), not a
+per-call-site option. Two details worth keeping: the envelope's last sample
+interpolates back into the first rather than holding, or every wrap puts a flat
+step at the seam; and the export copies PCM **per sample** rather than with
+`subarray()`, because a 4096-frame chunk can straddle a loop seam and
+`subarray` would run off the buffer and pad silence at exactly the point the
+track should be restarting.
+
+**Duration × N** sets Duration to exactly N track lengths. This needed two
+changes to `p-dur`: `step="any"` (a 0.5 step would land the timeline a few ms
+off the loop point every single time, which is the entire thing this control
+exists to prevent) and `max` widened `30 → 120` (looping a 30s track even twice
+needs more than 30). `dur`'s readout went to 2dp to stop it misreporting an
+exact multiple like `24.69`. Setting `N > 1` arms Loop with it — fitting three
+track lengths and then leaving two of them silent is never what was meant.
+
+The write still goes through the `p-dur` slider's own `input` event. **No
+second write path** — that slider is where auto-key, dirty marking, the
+`dur`/`dpr` side effects and `pushUniforms` all hang off, and the gesture phase
+already went out of its way not to add one.
+
+`audio.loop` is additive in the preset, no version bump, absent means `false`.
+
+### Measured
+
+On `3_3_2025.ply` (44,296 gaussians) and `bandtest.wav` (6.0s), `window.__bench`
+throughout.
+
+- **Test asset loads and renders from the repo**: 44,296 gaussians, 3.384%
+  coverage, mean R 179.2 against the `void` background, correct upright
+  orientation, zero console errors.
+- **Envelope wrap is exact.** With Duration = 3 × 6.00s = 18.00s and Loop on,
+  `routeLevel(t)`, `routeLevel(t + 6)` and `routeLevel(t + 12)` agreed to **6
+  decimal places** at every probe (t = 0.3, 1.0, 2.7, 4.5, 5.9).
+- **Loop off is unchanged**, not approximately unchanged: past the end the
+  level holds the final sample (`0.000625`) at +1s, +5s and +11s, identical to
+  the pre-existing clamp, and differs from an in-track value.
+- **Export audio fills the timeline.** `encodeAudioTrack(muxer, 18)` with Loop
+  off spans **6.084s** (capped at the track, old behaviour); with Loop on,
+  **18.088s** — the full timeline. 262 chunks vs 779.
+- **The repeats carry real audio, not silence.** Per-pass encoded bytes 42,811
+  / 77,744 / 78,283. Passes 2 and 3 agree to **0.7%** — identical content
+  encodes to nearly identical size. Pass 1 is smaller from AAC encoder
+  warm-up/priming, not missing audio; silence would be a few hundred bytes.
+- **Duration × N is exact**: `P.dur === audioDur * 3` exactly, and Loop
+  auto-armed.
+- **Preset round-trip byte-exact** (modulo the `saved` timestamp) with
+  `audio.loop: true`, `dur: 12`, and smear/DoF off default — verified
+  idempotent across three independent save→load→save runs.
+- **Mobile, 390×844**: no page overflow, no element off-screen, and the new
+  `× set` button hit-tests to itself via `elementFromPoint` — genuinely
+  tappable, not merely laid out.
+- **Full effect sweep after the reorganisation**, base coverage **3.384%**:
+  every effect still moves the picture and every one restores to base
+  *exactly* — `cullA` 3.350, `sat` 3.389, `dAmt` 13.456, `qAmt` 2.747,
+  `dpAmt` 3.223, `dofAperture` 5.592, `smearAmt` 8.207, `bright` 3.407,
+  `scale` 4.384, all returning to 3.384 on reset. This matters because the
+  merge moved `dofFocus`/`dofAperture` to a different `SPEC` group id and the
+  section markup was rewritten wholesale.
+- **`wAmt` alone changes nothing, and that is correct, not a regression.**
+  Wave modulates Noise / Quantise / Attract rather than displacing anything
+  itself, so at their defaults it has nothing to act on. Verified rather than
+  assumed: with `dAmt = 0.3` active, `wAmt = 0.6` moved coverage
+  **13.456 → 10.498**. Worth writing down because a sweep that flags Wave as
+  "no effect" looks exactly like a broken uniform.
+
+---
+
 ## Colour
 
 Three accents, and they mean different things. Do not reach for a fourth
-without a reason.
+without a reason. Section titles use `--signal` — see the rail-reorganisation
+section above for why that is not a fourth meaning.
 
 | token | use |
 |---|---|
@@ -3001,9 +3171,26 @@ checked rather than assumed:
   cannot set COOP/COEP headers. If a future Spark release adopts it, Pages
   stops being a viable host and that is the reason why.
 
-Both remote dependencies serve `access-control-allow-origin: *` — the pinned
-`spark.module.js` and the `butterfly.spz` test asset — so the CDN importmap and
-Load test asset both work from the Pages origin, not just localhost.
+The pinned `spark.module.js` serves `access-control-allow-origin: *`, so the
+CDN importmap works from the Pages origin, not just localhost. The test asset
+is no longer remote at all — see below — so Load test asset has no cross-origin
+dependency left.
+
+**The test asset is committed, deliberately against `.gitignore`'s own rule.**
+`3_3_2025.ply` (~11 MB, 44,296 gaussians, a Polycam daffodil capture) is
+un-ignored via a `!3_3_2025.ply` exception and served from the repo. Two
+reasons, and the second is the real one: the repo stays runnable as cloned, and
+every measurement from here on has a *fixed* subject. The previous asset was
+`butterfly.spz` fetched from Spark's own CDN — a third party's file, on a URL
+this project does not control, which could be re-encoded or removed without
+notice and would silently invalidate every coverage and luma figure in this
+file. 11 MB is well inside Pages' limits.
+
+**Figures measured against `butterfly.spz` (177,132 splats) are not comparable
+to figures measured against `3_3_2025.ply` (44,296 splats)** — different splat
+count, different geometry, different framing. Everything in this file dated
+before the rename is butterfly-based. This is a change of subject, not drift to
+chase, exactly like the `blurAmount: 0.3 -> 0` note in Phase 5.
 
 Pages is HTTPS, so the secure-context requirements (WebCodecs, `AudioContext`)
 are satisfied. Export still needs Chrome or Edge.

@@ -5,13 +5,18 @@
 *.bak
 
 # Splat captures. These are large binaries and are data, not source.
-# The app loads a remote test asset (butterfly.spz) so the repo stays
-# runnable without them. Drop a capture in the folder to work locally.
+# Drop a capture in the folder to work locally.
 *.ply
 *.spz
 *.splat
 *.ksplat
 *.sog
+
+# ...except the test asset, which IS committed on purpose: "Load test asset"
+# serves it from the repo so the app is runnable as cloned and so every
+# measurement in NOTES has a fixed, version-stable subject that cannot change
+# underneath it. ~11 MB, well inside Pages' limits.
+!3_3_2025.ply
 
 # Exported video
 *.mp4

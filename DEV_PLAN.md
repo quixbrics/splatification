@@ -1,4 +1,4 @@
-# Splatification — dev plan: regions-as-masks, camera keyframes, orbit, audio shaping, saturation
+# Gausseous (then Splatification) — dev plan: regions-as-masks, camera keyframes, orbit, audio shaping, saturation
 
 Read `NOTES.md` first. This plan assumes every invariant in it, in particular:
 
